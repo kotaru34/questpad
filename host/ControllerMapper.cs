@@ -22,6 +22,7 @@ internal sealed class ControllerMapper
     private const float DpadIntent = 0.18f;
     private const float GuideTriggerThreshold = 0.85f;
     private const double GuideHoldSeconds = 0.75;
+    private const double MenuHoldSeconds = 0.50;
     private const int StartPulseFrames = 3;
 
     private bool leftShoulder;
@@ -32,6 +33,9 @@ internal sealed class ControllerMapper
     private bool dpadRight;
     private bool menuWasDown;
     private bool menuUsed;
+    private bool startHoldActive;
+    private bool viewHoldActive;
+    private long menuDownTicks;
     private long guideStartTicks;
     private int startPulseFrames;
 
@@ -41,6 +45,9 @@ internal sealed class ControllerMapper
         ClearDpad();
         menuWasDown = false;
         menuUsed = false;
+        startHoldActive = false;
+        viewHoldActive = false;
+        menuDownTicks = 0;
         guideStartTicks = 0;
         startPulseFrames = 0;
     }
@@ -57,28 +64,31 @@ internal sealed class ControllerMapper
         float lg,
         float rg)
     {
+        long nowTicks = Stopwatch.GetTimestamp();
         bool menu = (buttons & BtnMenuRaw) != 0;
         bool leftThumb = (buttons & BtnLThumb) != 0;
         bool rightThumb = (buttons & BtnRThumb) != 0;
 
         if (menu && !menuWasDown)
         {
+            menuDownTicks = nowTicks;
             startPulseFrames = 0;
+            startHoldActive = false;
             menuUsed = false;
             guideStartTicks = 0;
             ClearDpad();
         }
 
-        if (!menu && menuWasDown)
-        {
-            if (!menuUsed)
-                startPulseFrames = StartPulseFrames;
-            guideStartTicks = 0;
-            ClearDpad();
-        }
+        // View is a latched chord: Menu + R3 starts a real held Back/View button,
+        // and it remains held for as long as R3 itself stays physically depressed.
+        // This lets the user release Menu after initiating the chord, which is both
+        // more comfortable and friendlier to games that distinguish tap vs hold.
+        if (viewHoldActive && !rightThumb)
+            viewHoldActive = false;
 
-        bool view = false;
+        bool view = viewHoldActive;
         bool guide = false;
+        bool startHeld = false;
         float outRx = rx;
         float outRy = ry;
         float outLt = lt;
@@ -87,41 +97,76 @@ internal sealed class ControllerMapper
 
         if (menu)
         {
-            // Ergonomic modifier layer: left thumb holds Menu while the right thumb
-            // gets an entire D-pad without requiring impossible same-hand chords.
-            if (Math.Abs(rx) >= DpadIntent || Math.Abs(ry) >= DpadIntent)
-                menuUsed = true;
-
-            UpdateDpad(rx, ry);
-            outRx = outRy = 0.0f; // never leak camera movement while using the D-pad layer
-
-            // Menu + R3 -> Back/View. Easy cross-hand chord; suppress the R3 itself.
-            if (rightThumb)
+            // Once a plain Menu hold has committed to Start/Menu, keep that mode
+            // until release. This prevents a late camera movement from unexpectedly
+            // turning a held Start button into the D-pad modifier layer.
+            if (!startHoldActive && !menuUsed && menuDownTicks != 0 &&
+                SecondsSince(menuDownTicks, nowTicks) >= MenuHoldSeconds)
             {
-                view = true;
-                outRightThumb = false;
-                menuUsed = true;
+                startHoldActive = true;
             }
 
-            // The Meta/System button belongs to Horizon OS and is not a safe app binding.
-            // Menu + both triggers held deliberately for 750 ms supplies Xbox Guide.
-            bool guideChord = lt >= GuideTriggerThreshold && rt >= GuideTriggerThreshold;
-            if (guideChord)
+            if (startHoldActive)
             {
-                menuUsed = true;
-                outLt = outRt = 0.0f; // don't fire/brake in-game while invoking Guide
-                if (guideStartTicks == 0)
-                    guideStartTicks = Stopwatch.GetTimestamp();
-                guide = SecondsSince(guideStartTicks, Stopwatch.GetTimestamp()) >= GuideHoldSeconds;
+                startHeld = true;
             }
             else
             {
-                guideStartTicks = 0;
+                // Ergonomic modifier layer: left thumb holds Menu while the right thumb
+                // gets an entire D-pad without requiring impossible same-hand chords.
+                if (Math.Abs(rx) >= DpadIntent || Math.Abs(ry) >= DpadIntent)
+                    menuUsed = true;
+
+                UpdateDpad(rx, ry);
+                outRx = outRy = 0.0f; // never leak camera movement while using the D-pad layer
+
+                // Menu + R3 -> Back/View. Activation latches until R3 is released,
+                // so long-press behavior is a genuine continuous Xbox Back/View hold.
+                if (rightThumb)
+                {
+                    viewHoldActive = true;
+                    view = true;
+                    outRightThumb = false;
+                    menuUsed = true;
+                }
+
+                // The Meta/System button belongs to Horizon OS and is not a safe app binding.
+                // Menu + both triggers held deliberately for 750 ms supplies Xbox Guide.
+                bool guideChord = lt >= GuideTriggerThreshold && rt >= GuideTriggerThreshold;
+                if (guideChord)
+                {
+                    menuUsed = true;
+                    outLt = outRt = 0.0f; // don't fire/brake in-game while invoking Guide
+                    if (guideStartTicks == 0)
+                        guideStartTicks = nowTicks;
+                    guide = SecondsSince(guideStartTicks, nowTicks) >= GuideHoldSeconds;
+                }
+                else
+                {
+                    guideStartTicks = 0;
+                }
             }
         }
         else
         {
+            if (menuWasDown)
+            {
+                // A quick, otherwise-unused Menu press remains a normal Start/Menu tap.
+                // A committed long hold has already been sent continuously and must not
+                // generate another pulse on release.
+                if (!menuUsed && !startHoldActive)
+                    startPulseFrames = StartPulseFrames;
+                ClearDpad();
+            }
+            startHoldActive = false;
+            menuDownTicks = 0;
             guideStartTicks = 0;
+        }
+
+        if (viewHoldActive)
+        {
+            view = true;
+            outRightThumb = false;
         }
 
         menuWasDown = menu;
@@ -155,7 +200,7 @@ internal sealed class ControllerMapper
         Set(pad, Xbox360Button.Left, dpadLeft);
         Set(pad, Xbox360Button.Right, dpadRight);
         Set(pad, Xbox360Button.Back, view);
-        Set(pad, Xbox360Button.Start, startPulseFrames > 0);
+        Set(pad, Xbox360Button.Start, startHeld || startPulseFrames > 0);
         Set(pad, Xbox360Button.Guide, guide);
         pad.SubmitReport();
 
