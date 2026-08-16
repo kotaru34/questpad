@@ -28,10 +28,8 @@ internal sealed class MotionProcessor
 
         if (settings.GyroSource == GyroSourceMode.AngularRate)
         {
-            // The Quest side obtains this vector from xrLocateSpace with LOCAL as the
-            // target and the right controller as the base space. That makes the rate
-            // controller-local without the Windows host consuming optical position or
-            // absolute orientation. It is still Horizon/OpenXR data, not raw MEMS.
+            // Windows consumes only the controller-local OpenXR angular-rate vector.
+            // This is still Horizon/OpenXR data rather than raw MEMS access.
             if (frame.Right.Active && frame.Right.AngularValid)
             {
                 gyro = frame.Right.AngularVelocityLocal;
@@ -42,8 +40,8 @@ internal sealed class MotionProcessor
         else if (settings.GyroSource == GyroSourceMode.CameraAssisted)
         {
             // Deliberately require optical positional tracking for the A/B experiment.
-            // This source is derived from successive tracked orientations rather than
-            // using XrSpaceVelocity, so it exercises the camera-assisted pose path.
+            // Rate is derived from successive tracked orientations instead of using
+            // XrSpaceVelocity, making this an explicitly camera-assisted reference.
             if (frame.Right.Active && frame.Right.OrientationTracked && frame.Right.PositionTracked)
             {
                 Quaternion q = NormalizeSafe(frame.Right.Orientation);
@@ -87,7 +85,7 @@ internal sealed class MotionProcessor
     {
         Quaternion delta = NormalizeSafe(current * Quaternion.Conjugate(previous));
         if (delta.W < 0)
-            delta = new Quaternion(-delta.X, -delta.Y, -delta.Z, -delta.W);
+            delta = Negate(delta);
 
         float sinHalf = new Vector3(delta.X, delta.Y, delta.Z).Length();
         if (sinHalf < 1e-7f) return Vector3.Zero;
@@ -102,6 +100,8 @@ internal sealed class MotionProcessor
         return n > 1e-10f && float.IsFinite(n) ? Quaternion.Normalize(q) : Quaternion.Identity;
     }
 
+    internal static Quaternion Negate(Quaternion q) => new(-q.X, -q.Y, -q.Z, -q.W);
+
     internal static bool IsFinite(Vector3 v) =>
         float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
 }
@@ -112,7 +112,7 @@ internal sealed class SteeringEstimator
     private Quaternion baseLeft;
     private Quaternion baseRight;
     private Quaternion baseRelative;
-    private Quaternion previousCommon;
+    private Quaternion previousCommonDelta = Quaternion.Identity;
     private Vector3 previousSpan;
     private bool havePreviousCommon;
     private bool havePreviousSpan;
@@ -131,11 +131,17 @@ internal sealed class SteeringEstimator
         baseLeft = MotionProcessor.NormalizeSafe(frame.Left.Orientation);
         baseRight = MotionProcessor.NormalizeSafe(frame.Right.Orientation);
         baseRelative = MotionProcessor.NormalizeSafe(Quaternion.Conjugate(baseLeft) * baseRight);
-        previousCommon = Average(baseLeft, baseRight);
+
+        // Each hand is allowed to have an arbitrary mounting orientation. The wheel
+        // rigid-body rotation is measured as qNow * inverse(qAtCalibration), so two
+        // differently/mirrored mounted Touch controllers still produce the same delta.
+        previousCommonDelta = Quaternion.Identity;
         havePreviousCommon = true;
+
         havePreviousSpan = frame.Left.PositionTracked && frame.Right.PositionTracked;
         if (havePreviousSpan)
             previousSpan = frame.Right.Position - frame.Left.Position;
+
         wheelAxis = Vector3.Zero;
         haveAxis = false;
         axisEvidence = 0;
@@ -166,6 +172,12 @@ internal sealed class SteeringEstimator
             frame.Left.OrientationTracked && frame.Right.OrientationTracked;
         bool opticalGood = frame.Left.PositionTracked && frame.Right.PositionTracked;
 
+        Quaternion commonDelta = previousCommonDelta;
+        float mountError = 0;
+        string orientationHealth = "orientation unavailable";
+        if (orientationGood)
+            commonDelta = FuseRigidDelta(frame, out mountError, out orientationHealth);
+
         bool useOptical = settings.Steering switch
         {
             SteeringMode.FreeAir => opticalGood,
@@ -179,21 +191,35 @@ internal sealed class SteeringEstimator
 
         if (useOptical)
         {
+            // Position is consumed ONLY with PT=1 for both controllers. PV=1/PT=0
+            // values seen in Horizon tests are deliberately ignored as stale/predicted.
             Vector3 span = frame.Right.Position - frame.Left.Position;
             if (span.LengthSquared() > 0.01f)
             {
                 if (havePreviousSpan)
                 {
                     float step = SignedProjectedAngle(previousSpan, span, wheelAxis);
-                    if (MathF.Abs(step) < 0.75f)
+                    if (MathF.Abs(step) < Degrees(45))
                     {
                         angleRadians += step;
                         updated = true;
                         source = settings.Steering == SteeringMode.Hybrid ? "hybrid optical" : "free-air optical";
                     }
+                    else
+                    {
+                        source = "rejected optical steering spike";
+                    }
                 }
                 previousSpan = span;
                 havePreviousSpan = true;
+            }
+
+            // Keep the orientation baseline synchronized while optical steering is in
+            // charge. A later Hybrid fallback can then take over without a jump.
+            if (orientationGood)
+            {
+                previousCommonDelta = commonDelta;
+                havePreviousCommon = true;
             }
         }
         else
@@ -203,30 +229,22 @@ internal sealed class SteeringEstimator
 
         if (!updated && canUseOrientation)
         {
-            Quaternion left = MotionProcessor.NormalizeSafe(frame.Left.Orientation);
-            Quaternion right = MotionProcessor.NormalizeSafe(frame.Right.Orientation);
-            Quaternion common = Average(left, right);
-
             if (havePreviousCommon)
             {
-                Quaternion stepQ = MotionProcessor.NormalizeSafe(common * Quaternion.Conjugate(previousCommon));
+                Quaternion stepQ = MotionProcessor.NormalizeSafe(commonDelta * Quaternion.Conjugate(previousCommonDelta));
                 float step = TwistAngle(stepQ, wheelAxis);
 
-                // Two rigidly mounted controllers should preserve their relative pose.
-                // Reject implausible single-frame jumps rather than turning them into a
-                // steering spike. Smaller mounting creep is averaged out by the common
-                // rigid-body rotation and the adaptive steering filter.
-                Quaternion relative = MotionProcessor.NormalizeSafe(Quaternion.Conjugate(left) * right);
-                Quaternion relativeError = MotionProcessor.NormalizeSafe(relative * Quaternion.Conjugate(baseRelative));
-                float mountError = QuaternionAngle(relativeError);
-                float maxStep = mountError > Degrees(25) ? Degrees(8) : Degrees(45);
-
+                // Large relative-mount disagreement means one controller probably
+                // slipped or one tracking sample jumped. FuseRigidDelta already trusts
+                // the hand closest to the predicted wheel state; clamp remaining
+                // implausible one-frame wheel rotation as a second safety barrier.
+                float maxStep = mountError > Degrees(25) ? Degrees(10) : Degrees(45);
                 if (MathF.Abs(step) <= maxStep)
                 {
                     angleRadians += step;
                     updated = true;
                     source = mountError > Degrees(8)
-                        ? $"mounted orientation (mount mismatch {RadiansToDegrees(mountError):F1}°)"
+                        ? $"mounted orientation — {orientationHealth}, mismatch {RadiansToDegrees(mountError):F1}°"
                         : "mounted orientation";
                 }
                 else
@@ -235,10 +253,10 @@ internal sealed class SteeringEstimator
                 }
             }
 
-            previousCommon = common;
+            previousCommonDelta = commonDelta;
             havePreviousCommon = true;
         }
-        else if (!orientationGood)
+        else if (!orientationGood && !useOptical)
         {
             havePreviousCommon = false;
         }
@@ -250,11 +268,55 @@ internal sealed class SteeringEstimator
         float raw = Math.Clamp(RadiansToDegrees(angleRadians) / halfRange, -1.0f, 1.0f);
         float filtered = steeringFilter.Filter(raw, frame.QuestTimestampNs, settings.SteeringSmoothing);
 
-        // Brief tracking dropouts freeze the last wheel position. Do not auto-center a
-        // car just because Horizon idled or lost one controller for a moment.
+        // Brief dropouts freeze the last wheel position. Do not auto-center a car just
+        // because Horizon idled/lost a controller. After 500 ms the host falls back to
+        // the physical left stick by treating steering as invalid.
         bool recent = lastGoodNs != 0 && frame.QuestTimestampNs >= lastGoodNs &&
             frame.QuestTimestampNs - lastGoodNs <= 500_000_000UL;
         return (updated || recent, filtered, source);
+    }
+
+    private Quaternion FuseRigidDelta(MotionFrame frame, out float mountError, out string health)
+    {
+        Quaternion left = MotionProcessor.NormalizeSafe(frame.Left.Orientation);
+        Quaternion right = MotionProcessor.NormalizeSafe(frame.Right.Orientation);
+
+        Quaternion leftDelta = MotionProcessor.NormalizeSafe(left * Quaternion.Conjugate(baseLeft));
+        Quaternion rightDelta = MotionProcessor.NormalizeSafe(right * Quaternion.Conjugate(baseRight));
+        AlignHemisphere(leftDelta, ref rightDelta);
+
+        Quaternion relative = MotionProcessor.NormalizeSafe(Quaternion.Conjugate(left) * right);
+        Quaternion relativeError = MotionProcessor.NormalizeSafe(relative * Quaternion.Conjugate(baseRelative));
+        mountError = QuaternionAngle(relativeError);
+
+        float pairDisagreement = QuaternionDistance(leftDelta, rightDelta);
+        if (pairDisagreement <= Degrees(6) || !havePreviousCommon)
+        {
+            health = "both controllers fused";
+            return Average(leftDelta, rightDelta);
+        }
+
+        // If one controller shifts in a loose mount or suffers a tracking jump, choose
+        // the observation nearest the already-established wheel trajectory rather than
+        // averaging the bad sample halfway into the steering output.
+        float leftInnovation = QuaternionDistance(previousCommonDelta, leftDelta);
+        float rightInnovation = QuaternionDistance(previousCommonDelta, rightDelta);
+        if (leftInnovation + Degrees(1) < rightInnovation)
+        {
+            health = "right outlier suppressed";
+            return leftDelta;
+        }
+        if (rightInnovation + Degrees(1) < leftInnovation)
+        {
+            health = "left outlier suppressed";
+            return rightDelta;
+        }
+
+        // Ambiguous disagreement (for example gradual physical creep) is safer to
+        // average than to invent which mount moved. The mismatch is surfaced in tray
+        // status so the user can re-center if it keeps growing.
+        health = "mount disagreement averaged";
+        return Average(leftDelta, rightDelta);
     }
 
     private void LearnAxis(MotionFrame frame)
@@ -263,8 +325,10 @@ internal sealed class SteeringEstimator
             !frame.Left.OrientationValid || !frame.Right.OrientationValid)
             return;
 
-        Vector3 lw = Vector3.Transform(frame.Left.AngularVelocityLocal, frame.Left.Orientation);
-        Vector3 rw = Vector3.Transform(frame.Right.AngularVelocityLocal, frame.Right.Orientation);
+        Quaternion lq = MotionProcessor.NormalizeSafe(frame.Left.Orientation);
+        Quaternion rq = MotionProcessor.NormalizeSafe(frame.Right.Orientation);
+        Vector3 lw = Vector3.Transform(frame.Left.AngularVelocityLocal, lq);
+        Vector3 rw = Vector3.Transform(frame.Right.AngularVelocityLocal, rq);
         Vector3 candidate = (lw + rw) * 0.5f;
         float speed = candidate.Length();
         if (speed < 0.20f) return;
@@ -285,10 +349,23 @@ internal sealed class SteeringEstimator
 
     private static Quaternion Average(Quaternion a, Quaternion b)
     {
-        if (Quaternion.Dot(a, b) < 0)
-            b = new Quaternion(-b.X, -b.Y, -b.Z, -b.W);
+        AlignHemisphere(a, ref b);
         return MotionProcessor.NormalizeSafe(new Quaternion(
             a.X + b.X, a.Y + b.Y, a.Z + b.Z, a.W + b.W));
+    }
+
+    private static void AlignHemisphere(Quaternion reference, ref Quaternion q)
+    {
+        if (Quaternion.Dot(reference, q) < 0)
+            q = MotionProcessor.Negate(q);
+    }
+
+    private static float QuaternionDistance(Quaternion a, Quaternion b)
+    {
+        a = MotionProcessor.NormalizeSafe(a);
+        b = MotionProcessor.NormalizeSafe(b);
+        float dot = Math.Clamp(MathF.Abs(Quaternion.Dot(a, b)), 0.0f, 1.0f);
+        return 2.0f * MathF.Acos(dot);
     }
 
     private static float TwistAngle(Quaternion q, Vector3 axis)
