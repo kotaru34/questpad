@@ -20,26 +20,29 @@ Grip-to-shoulder conversion uses hysteresis: press at 0.62, release below 0.45. 
 
 ## Menu modifier layer
 
-The physical **left Menu** button acts as a modifier because it is available to applications. The Meta/System button remains owned by Horizon OS.
+The physical **left Menu** button acts as both the Xbox Start/Menu control and a modifier because it is available to applications. The Meta/System button remains owned by Horizon OS.
 
 | Gesture | Virtual Xbox 360 |
 |---|---|
-| Tap and release Menu | Start / Menu |
+| Tap and release Menu | Start / Menu tap |
+| Hold Menu by itself for 0.50 s | Start / Menu held continuously until release |
 | Hold Menu + right stick ↑ | D-pad Up |
 | Hold Menu + right stick ↓ | D-pad Down |
 | Hold Menu + right stick ← | D-pad Left |
 | Hold Menu + right stick → | D-pad Right |
 | Hold Menu + right stick diagonally | matching D-pad diagonal |
-| Hold Menu + R3 | Back / View |
+| Menu + R3 | Back / View; stays held while R3 remains physically held |
 | Hold Menu + LT + RT for 0.75 s | Guide |
 
 ### Why this layout
 
 - Menu is on the left controller, leaving the right thumb free for the D-pad layer.
+- A quick Menu press still behaves like an ordinary Start/Menu tap.
+- A plain Menu hold commits to a real continuous Start/Menu hold after 0.50 s, which is required by games that distinguish press from hold.
+- Modifier actions must begin before the plain Menu hold commits. Once the hold has committed, it stays Start/Menu until release instead of changing mode unexpectedly.
 - Right-stick camera output is suppressed while Menu is held for D-pad use.
-- Menu + R3 is a cross-hand chord and does not require one thumb to press two controls at once.
+- Menu + R3 is a cross-hand chord and does not require one thumb to press two controls at once. Once activated, Back/View remains down until R3 is released, so games can detect a genuine long press and the user may release Menu after starting the chord.
 - Guide is intentionally deliberate because it is rarely needed during moment-to-moment gameplay.
-- A plain Menu press becomes Start only after release and only if no modifier action was used.
 - D-pad directions use hysteresis to avoid chatter around direction boundaries.
 
 ## Exiting QuestPad
@@ -61,6 +64,18 @@ Releasing any part of the gesture before 3 seconds cancels the exit sequence.
 ## Touch Plus inputs intentionally left unused
 
 Touch Plus exposes additional capacitive/touch-style signals that do not have direct equivalents on a standard Xbox 360 controller. Mapping normal finger-rest states to gameplay buttons would increase accidental input, so these signals are reserved for future optional profiles rather than enabled by default.
+
+## Motion data
+
+Touch Plus also exposes tracked controller poses through OpenXR (`grip/pose` and `aim/pose`). OpenXR can return orientation, position, linear velocity and angular velocity for those tracked spaces. QuestPad does not currently forward motion data because the Xbox 360/XInput report has no gyroscope or accelerometer fields.
+
+A future motion profile can therefore use one of three strategies without changing the basic controller transport:
+
+- right Touch Plus motion as the default aiming gyro source;
+- left Touch Plus motion as an alternative source;
+- a synthesized two-hand virtual-gamepad frame derived from both controller poses for users who hold the controllers like two halves of one gamepad.
+
+The first option is expected to be the most stable and ergonomic default. A synthesized two-hand frame is possible but inherently less deterministic because the two Touch Plus controllers are independent physical objects rather than one rigid controller shell.
 
 ## Haptics
 
