@@ -13,6 +13,9 @@ internal static class Program
     private const uint Magic = 0x44415051;
     private const ushort Protocol = 1;
     private const int PacketSize = 68;
+    private const uint FeedbackMagic = 0x31424651; // QFB1 little-endian
+    private const int FeedbackSize = 8;
+    private static int RumblePacked; // high byte = large motor, low byte = small motor
     private const double Deadzone = 0.08;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
@@ -85,10 +88,13 @@ internal static class Program
                 // We update the entire XInput report once per Quest sample. Leaving this at
                 // the library default would submit once for every individual axis/button setter.
                 pad.AutoSubmitReport = false;
+                pad.FeedbackReceived += (_, e) =>
+                    Volatile.Write(ref RumblePacked, (e.LargeMotor << 8) | e.SmallMotor);
                 pad.Connect();
                 Neutral(pad);
                 Console.WriteLine("Virtual Xbox 360 controller: connected");
                 Console.WriteLine("Full-gamepad layer: Menu tap=Start; Menu+RS=D-pad; Menu+R3=Back/View; Menu+LT+RT=Guide.");
+                Console.WriteLine("Rumble bridge: Xbox large/small motors -> left/right Touch Plus haptics.");
             }
             catch (Exception ex)
             {
@@ -135,6 +141,8 @@ internal static class Program
                 using NetworkStream stream = tcp.GetStream();
                 byte[] packet = new byte[PacketSize];
                 uint? previousSeq = null;
+                int lastSentRumble = -1;
+                long lastRumbleSendTicks = 0;
                 long lastPrintTicks = Stopwatch.GetTimestamp();
                 long windowPackets = 0;
                 long dropped = 0;
@@ -155,6 +163,20 @@ internal static class Program
                     previousSeq = p.Sequence;
                     windowPackets++;
 
+                    // ViGEm's feedback callback may run on another thread. Ship the
+                    // latest two motor amplitudes back over the same full-duplex TCP
+                    // connection. A 100 ms keepalive also guarantees that the Quest
+                    // eventually learns the current state after any transient loss.
+                    int rumble = pad is null ? 0 : Volatile.Read(ref RumblePacked);
+                    long feedbackNow = Stopwatch.GetTimestamp();
+                    if (rumble != lastSentRumble ||
+                        SecondsSince(lastRumbleSendTicks, feedbackNow) >= 0.100)
+                    {
+                        await SendFeedbackAsync(stream, rumble, ct);
+                        lastSentRumble = rumble;
+                        lastRumbleSendTicks = feedbackNow;
+                    }
+
                     if (pad is not null)
                     {
                         // FLAG_FOCUSED = bit 1. Quest sends a neutral packet on focus loss,
@@ -162,6 +184,7 @@ internal static class Program
                         if ((p.Flags & 0x2u) == 0)
                         {
                             mapper.Reset();
+                            Volatile.Write(ref RumblePacked, 0);
                             Neutral(pad);
                         }
                         else
@@ -191,6 +214,7 @@ internal static class Program
             catch (Exception ex)
             {
                 mapper.Reset();
+                Volatile.Write(ref RumblePacked, 0);
                 if (pad is not null)
                 {
                     try { Neutral(pad); } catch { }
@@ -200,6 +224,16 @@ internal static class Program
                 catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    private static async Task SendFeedbackAsync(NetworkStream stream, int packed, CancellationToken ct)
+    {
+        byte[] feedback = new byte[FeedbackSize];
+        BinaryPrimitives.WriteUInt32LittleEndian(feedback.AsSpan(0, 4), FeedbackMagic);
+        feedback[4] = (byte)((packed >> 8) & 0xFF);
+        feedback[5] = (byte)(packed & 0xFF);
+        // bytes 6..7 reserved
+        await stream.WriteAsync(feedback, ct);
     }
 
     private static async Task ReadExactlyWithTimeoutAsync(NetworkStream stream, byte[] buffer, TimeSpan timeout, CancellationToken outer)

@@ -35,6 +35,7 @@ namespace {
 constexpr const char* kTag = "QuestPad";
 constexpr uint16_t kPort = 38888;
 constexpr uint32_t kMagic = 0x44415051u; // "QPAD" little-endian
+constexpr uint32_t kFeedbackMagic = 0x31424651u; // "QFB1" little-endian
 constexpr uint16_t kProtocolVersion = 1;
 constexpr uint64_t kExitHoldNs = 3'000'000'000ULL;
 
@@ -68,6 +69,14 @@ struct __attribute__((packed)) PadPacket {
     uint32_t reserved;
 };
 static_assert(sizeof(PadPacket) == 68, "PadPacket wire size changed");
+
+struct __attribute__((packed)) RumblePacket {
+    uint32_t magic;
+    uint8_t largeMotor;
+    uint8_t smallMotor;
+    uint16_t reserved;
+};
+static_assert(sizeof(RumblePacket) == 8, "RumblePacket wire size changed");
 
 enum PacketFlags : uint32_t {
     FLAG_SESSION_ACTIVE = 1u << 0,
@@ -106,6 +115,45 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
+    uint16_t pollRumble() {
+        int fd = clientFd_.load(std::memory_order_relaxed);
+        if (fd < 0) {
+            rumblePacked_.store(0, std::memory_order_relaxed);
+            feedbackBytes_ = 0;
+            return 0;
+        }
+
+        for (;;) {
+            const ssize_t n = ::recv(
+                fd, feedbackBuf_ + feedbackBytes_, sizeof(feedbackBuf_) - feedbackBytes_, MSG_DONTWAIT);
+            if (n > 0) {
+                feedbackBytes_ += static_cast<size_t>(n);
+                if (feedbackBytes_ == sizeof(feedbackBuf_)) {
+                    RumblePacket feedback{};
+                    std::memcpy(&feedback, feedbackBuf_, sizeof(feedback));
+                    feedbackBytes_ = 0;
+                    if (feedback.magic == kFeedbackMagic) {
+                        const uint16_t packed =
+                            (static_cast<uint16_t>(feedback.largeMotor) << 8) | feedback.smallMotor;
+                        rumblePacked_.store(packed, std::memory_order_relaxed);
+                    } else {
+                        LOGW("invalid rumble packet magic: 0x%08x", feedback.magic);
+                    }
+                }
+                continue;
+            }
+            if (n == 0) {
+                dropClient(fd);
+                return 0;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return rumblePacked_.load(std::memory_order_relaxed);
+            if (errno == EINTR) continue;
+            dropClient(fd);
+            return 0;
+        }
+    }
+
     void sendPacket(const PadPacket& packet) {
         int fd = clientFd_.load(std::memory_order_relaxed);
         if (fd < 0) return;
@@ -135,6 +183,8 @@ private:
         int expected = fd;
         if (clientFd_.compare_exchange_strong(expected, -1)) {
             close(fd);
+            rumblePacked_.store(0, std::memory_order_relaxed);
+            feedbackBytes_ = 0;
             LOGW("host disconnected");
         }
     }
@@ -182,6 +232,8 @@ private:
             }
             const int old = clientFd_.exchange(c);
             if (old >= 0) close(old);
+            rumblePacked_.store(0, std::memory_order_relaxed);
+            feedbackBytes_ = 0;
             int snd = 4096;
             setsockopt(c, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
             int noDelay = 1;
@@ -193,6 +245,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> listenFd_{-1};
     std::atomic<int> clientFd_{-1};
+    std::atomic<uint16_t> rumblePacked_{0};
+    uint8_t feedbackBuf_[sizeof(RumblePacket)]{};
+    size_t feedbackBytes_ = 0;
     std::thread thread_;
 };
 
@@ -257,6 +312,8 @@ struct Actions {
     XrAction lThumb = XR_NULL_HANDLE;
     XrAction rThumb = XR_NULL_HANDLE;
     XrAction view = XR_NULL_HANDLE;
+    XrAction lHaptic = XR_NULL_HANDLE;
+    XrAction rHaptic = XR_NULL_HANDLE;
 };
 
 bool xrOk(XrInstance inst, XrResult r, const char* what) {
@@ -297,6 +354,8 @@ bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlus
     a.lThumb = makeAction(a.set, XR_ACTION_TYPE_BOOLEAN_INPUT, "left_thumb_click", "Left thumb click");
     a.rThumb = makeAction(a.set, XR_ACTION_TYPE_BOOLEAN_INPUT, "right_thumb_click", "Right thumb click");
     a.view = makeAction(a.set, XR_ACTION_TYPE_BOOLEAN_INPUT, "view", "View");
+    a.lHaptic = makeAction(a.set, XR_ACTION_TYPE_VIBRATION_OUTPUT, "left_haptic", "Left haptic");
+    a.rHaptic = makeAction(a.set, XR_ACTION_TYPE_VIBRATION_OUTPUT, "right_haptic", "Right haptic");
 
     std::vector<XrActionSuggestedBinding> bindings;
     auto bind = [&](XrAction action, const char* pathText) {
@@ -316,6 +375,8 @@ bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlus
     bind(a.lThumb, "/user/hand/left/input/thumbstick/click");
     bind(a.rThumb, "/user/hand/right/input/thumbstick/click");
     bind(a.view, "/user/hand/left/input/menu/click");
+    bind(a.lHaptic, "/user/hand/left/output/haptic");
+    bind(a.rHaptic, "/user/hand/right/output/haptic");
 
     auto suggestProfile = [&](const char* profileText) {
         XrPath profile = XR_NULL_PATH;
@@ -360,6 +421,21 @@ XrActionStateVector2f getVec2(XrSession s, XrAction a) {
     XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F};
     xrGetActionStateVector2f(s, &gi, &st);
     return st;
+}
+
+void setHaptic(XrSession session, XrAction action, uint8_t intensity) {
+    XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+    info.action = action;
+    if (intensity == 0) {
+        xrStopHapticFeedback(session, &info);
+        return;
+    }
+    XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+    vibration.duration = 100'000'000; // 100 ms; refreshed before expiry
+    vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+    vibration.amplitude = static_cast<float>(intensity) / 255.0f;
+    xrApplyHapticFeedback(
+        session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
 }
 
 void setLowBrightnessAndKeepAwake(ANativeActivity* activity) {
@@ -555,6 +631,8 @@ void android_main(android_app* app) {
     uint64_t exitStartNs = 0;
     int thermal = -1;
     uint64_t nextThermalPoll = 0;
+    uint16_t lastRumble = 0;
+    uint64_t nextHapticRefresh = 0;
 
     app->userData = &resumed;
     app->onAppCmd = [](android_app* a, int32_t cmd) {
@@ -705,6 +783,27 @@ void android_main(android_app* app) {
         // If the app loses XR focus, the packet stays neutral by construction.
         bridge.sendPacket(packet);
 
+        // Reverse feedback path: preserve the Xbox 360 two-motor distinction by
+        // mapping the large/low-frequency motor to the left Touch controller and
+        // the small/high-frequency motor to the right. OpenXR runtimes choose the
+        // actual actuator frequency when XR_FREQUENCY_UNSPECIFIED is used.
+        const uint16_t rumble = bridge.pollRumble();
+        const uint8_t largeMotor = static_cast<uint8_t>((rumble >> 8) & 0xFF);
+        const uint8_t smallMotor = static_cast<uint8_t>(rumble & 0xFF);
+        if (!effectiveFocused || rumble == 0) {
+            if (lastRumble != 0) {
+                setHaptic(session, actions.lHaptic, 0);
+                setHaptic(session, actions.rHaptic, 0);
+            }
+            lastRumble = 0;
+            nextHapticRefresh = 0;
+        } else if (rumble != lastRumble || packet.monotonicNs >= nextHapticRefresh) {
+            setHaptic(session, actions.lHaptic, largeMotor);
+            setHaptic(session, actions.rHaptic, smallMotor);
+            lastRumble = rumble;
+            nextHapticRefresh = packet.monotonicNs + 75'000'000ULL;
+        }
+
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
         ei.displayTime = fs.predictedDisplayTime;
         ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -713,6 +812,8 @@ void android_main(android_app* app) {
         xrEndFrame(session, &ei);
     }
 
+    setHaptic(session, actions.lHaptic, 0);
+    setHaptic(session, actions.rHaptic, 0);
     bridge.stop();
     if (sessionActive) xrEndSession(session);
     if (actions.set != XR_NULL_HANDLE) xrDestroyActionSet(actions.set);
