@@ -38,6 +38,9 @@ constexpr uint32_t kMagic = 0x44415051u; // "QPAD" little-endian
 constexpr uint32_t kFeedbackMagic = 0x31424651u; // "QFB1" little-endian
 constexpr uint16_t kProtocolVersion = 1;
 constexpr uint64_t kExitHoldNs = 3'000'000'000ULL;
+constexpr uint64_t kExitPulseNs = 125'000'000ULL;
+constexpr float kShoulderPressThreshold = 0.62f;
+constexpr float kShoulderReleaseThreshold = 0.45f;
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kTag, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, kTag, __VA_ARGS__)
@@ -636,6 +639,11 @@ void android_main(android_app* app) {
     bool exitRequested = false;
     uint32_t sequence = 0;
     uint64_t exitStartNs = 0;
+    bool leftShoulderPressed = false;
+    bool rightShoulderPressed = false;
+    uint8_t exitPulseStage = 0;
+    uint8_t exitPulseStrength = 0;
+    uint64_t exitPulseUntilNs = 0;
     int thermal = -1;
     uint64_t nextThermalPoll = 0;
     uint16_t lastRumble = 0;
@@ -729,6 +737,13 @@ void android_main(android_app* app) {
         }
         packet.thermalStatus = thermal;
 
+        if (!effectiveFocused) {
+            leftShoulderPressed = false;
+            rightShoulderPressed = false;
+            exitStartNs = 0;
+            exitPulseStage = 0;
+        }
+
         if (effectiveFocused && XR_SUCCEEDED(xrSyncActions(session, &sync))) {
             const auto ls = getVec2(session, actions.lStick);
             const auto rs = getVec2(session, actions.rStick);
@@ -745,6 +760,20 @@ void android_main(android_app* app) {
             if (lg.isActive) packet.lg = std::clamp(lg.currentState, 0.0f, 1.0f);
             if (rg.isActive) packet.rg = std::clamp(rg.currentState, 0.0f, 1.0f);
 
+            // Treat the Touch Plus grip squeezes as the logical Xbox LB/RB buttons.
+            // Hysteresis matches the Windows mapper so the exit gesture works on the
+            // same comfortable squeeze used during normal gameplay instead of requiring
+            // an unusually hard >75% grip press.
+            auto updateShoulder = [](bool& latched, float value) {
+                if (latched) {
+                    if (value <= kShoulderReleaseThreshold) latched = false;
+                } else if (value >= kShoulderPressThreshold) {
+                    latched = true;
+                }
+            };
+            updateShoulder(leftShoulderPressed, packet.lg);
+            updateShoulder(rightShoulderPressed, packet.rg);
+
             auto pressed = [&](XrAction action) {
                 const auto st = getBool(session, action);
                 return st.isActive && st.currentState;
@@ -757,20 +786,35 @@ void android_main(android_app* app) {
             if (pressed(actions.rThumb)) packet.buttons |= BTN_RTHUMB;
             if (pressed(actions.view)) packet.buttons |= BTN_VIEW;
 
+            // Exit is expressed in Xbox terms: LS + RS + LB + RB for 3 s.
+            // LB/RB are the physical Touch Plus grip squeezes, normalized above with
+            // hysteresis. This keeps the gesture deliberate but comfortable.
             const bool exitChord =
                 (packet.buttons & BTN_LTHUMB) && (packet.buttons & BTN_RTHUMB) &&
-                packet.lg > 0.75f && packet.rg > 0.75f;
+                leftShoulderPressed && rightShoulderPressed;
             if (exitChord) {
                 if (exitStartNs == 0) exitStartNs = packet.monotonicNs;
                 packet.flags |= FLAG_EXIT_ARMED;
-                // Do not leak the exit chord into the emulated controller.
+
+                // Do not leak LS/RS/LB/RB into the emulated controller while the exit
+                // gesture is armed.
                 packet.buttons &= ~(BTN_LTHUMB | BTN_RTHUMB);
                 packet.lg = 0.0f;
                 packet.rg = 0.0f;
-                if (packet.monotonicNs - exitStartNs >= kExitHoldNs && !exitRequested) {
-                    LOGI("exit chord held for 3 seconds; requesting exit");
-                    // Make this and all subsequent packets neutral while the runtime
-                    // transitions through STOPPING -> EXITING.
+
+                const uint64_t heldNs = packet.monotonicNs - exitStartNs;
+                auto cueExitStage = [&](uint8_t stage, uint8_t strength) {
+                    if (exitPulseStage < stage) {
+                        exitPulseStage = stage;
+                        exitPulseStrength = strength;
+                        exitPulseUntilNs = packet.monotonicNs + kExitPulseNs;
+                    }
+                };
+                if (heldNs >= 1'000'000'000ULL) cueExitStage(1, 80);
+                if (heldNs >= 2'000'000'000ULL) cueExitStage(2, 150);
+                if (heldNs >= kExitHoldNs && !exitRequested) {
+                    cueExitStage(3, 255);
+                    LOGI("LS+RS+LB+RB held for 3 seconds; requesting exit");
                     packet.lx = packet.ly = packet.rx = packet.ry = 0.0f;
                     packet.lt = packet.rt = packet.lg = packet.rg = 0.0f;
                     packet.buttons = 0;
@@ -784,6 +828,7 @@ void android_main(android_app* app) {
                 }
             } else {
                 exitStartNs = 0;
+                exitPulseStage = 0;
             }
         }
 
@@ -797,11 +842,21 @@ void android_main(android_app* app) {
         const uint16_t rumble = bridge.pollRumble();
         const uint8_t largeMotor = static_cast<uint8_t>((rumble >> 8) & 0xFF);
         const uint8_t smallMotor = static_cast<uint8_t>(rumble & 0xFF);
-        if (!effectiveFocused || rumble == 0) {
-            if (lastRumble != 0) {
+        const bool exitCueActive =
+            exitPulseStrength != 0 && packet.monotonicNs < exitPulseUntilNs;
+        if (exitCueActive) {
+            // Exit countdown feedback intentionally overrides game rumble for a very
+            // short pulse on both controllers: 1 s, 2 s, then confirmation at 3 s.
+            setHaptic(session, actions.lHaptic, exitPulseStrength);
+            setHaptic(session, actions.rHaptic, exitPulseStrength);
+            lastRumble = 0;
+            nextHapticRefresh = 0;
+        } else if (!effectiveFocused || rumble == 0) {
+            if (lastRumble != 0 || exitPulseStrength != 0) {
                 setHaptic(session, actions.lHaptic, 0);
                 setHaptic(session, actions.rHaptic, 0);
             }
+            exitPulseStrength = 0;
             lastRumble = 0;
             nextHapticRefresh = 0;
         } else if (rumble != lastRumble || packet.monotonicNs >= nextHapticRefresh) {
