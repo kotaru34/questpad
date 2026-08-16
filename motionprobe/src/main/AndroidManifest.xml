@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:hasCode="false"
-        android:label="QuestPad Motion Probe"
+        android:label="QuestPad Placement Probe"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
         <meta-data android:name="com.oculus.supportedDevices" android:value="all" />
