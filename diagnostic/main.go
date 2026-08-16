@@ -18,6 +18,13 @@ const (
     protocol   = 1
 )
 
+func batteryText(packed uint32, validBit uint, shift uint) string {
+    if packed&(1<<validBit) == 0 {
+        return "n/a"
+    }
+    return fmt.Sprintf("%d%%", (packed>>shift)&0xff)
+}
+
 func main() {
     adb := flag.String("adb", "adb", "path to adb.exe")
     serial := flag.String("serial", "", "ADB device serial (optional)")
@@ -71,6 +78,7 @@ func main() {
                 return math.Float32frombits(binary.LittleEndian.Uint32(buf[28+off : 32+off]))
             }
             buttons := binary.LittleEndian.Uint32(buf[60:64])
+            battery := binary.LittleEndian.Uint32(buf[64:68])
 
             if havePrev {
                 delta := seq - prev
@@ -78,8 +86,9 @@ func main() {
             }
             prev, havePrev = seq, true
 
-            fmt.Printf("\rseq=%-8d flags=%02x L=(%+.2f,%+.2f) R=(%+.2f,%+.2f) LT=%.2f RT=%.2f LG=%.2f RG=%.2f btn=%02x therm=%d drops=%d   ",
-                seq, flags, f(0), f(4), f(8), f(12), f(16), f(20), f(24), f(28), buttons, thermal, dropped)
+            fmt.Printf("\rseq=%-8d flags=%02x L=(%+.2f,%+.2f) R=(%+.2f,%+.2f) LT=%.2f RT=%.2f LG=%.2f RG=%.2f btn=%02x bat=%s/%s therm=%d drops=%d   ",
+                seq, flags, f(0), f(4), f(8), f(12), f(16), f(20), f(24), f(28), buttons,
+                batteryText(battery, 16, 0), batteryText(battery, 17, 8), thermal, dropped)
         }
         time.Sleep(500 * time.Millisecond)
     }
