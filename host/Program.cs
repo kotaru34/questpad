@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Windows.Forms;
 using Nefarius.ViGEm.Client;
 using Nefarius.ViGEm.Client.Targets;
 using Nefarius.ViGEm.Client.Targets.Xbox360;
@@ -78,7 +79,7 @@ internal static class Program
             adb = FindAdb(adbOverride);
             if (adb is null)
             {
-                Console.Error.WriteLine("ADB not found. Put adb.exe in PATH or use --adb C:\\path\\to\\adb.exe");
+                FatalError("ADB not found. Put adb.exe in PATH or start QuestPad with --adb C:\\path\\to\\adb.exe");
                 return 2;
             }
 
@@ -87,10 +88,18 @@ internal static class Program
             RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
             if (!RunAdb(adb, serial, "forward", $"tcp:{Port}", $"tcp:{Port}"))
             {
-                Console.Error.WriteLine("Could not create the ADB port forward. Check USB debugging/authorization or pass --serial if multiple Android devices are connected.");
+                FatalError("Could not create the ADB port forward. Check USB debugging/authorization or pass --serial if multiple Android devices are connected.");
                 return 3;
             }
         }
+
+        // The OpenXR battery extension is still kept as the preferred source. When
+        // Horizon does not expose valid controller battery data, the host can query
+        // the shell-side OVRRemoteService over the same ADB connection. This runs on
+        // a slow independent poller and never blocks controller packets or XInput.
+        AdbControllerBatteryPoller? batteryPoller = adb is null
+            ? null
+            : new AdbControllerBatteryPoller(adb, serial, Status, Cancel.Token);
 
         ViGEmClient? vigem = null;
         IXbox360Controller? pad = null;
@@ -130,6 +139,9 @@ internal static class Program
         }
         finally
         {
+            if (batteryPoller is not null)
+                await batteryPoller.DisposeAsync();
+
             if (pad is not null)
             {
                 try { Neutral(pad); } catch { }
@@ -228,7 +240,8 @@ internal static class Program
                         windowPackets = 0;
                         var (leftBattery, rightBattery) = DecodeBatteries(p.Reserved);
                         Status.UpdateTelemetry(hz, dropped, ThermalName(p.Thermal), leftBattery, rightBattery);
-                        string batteryText = $"bat L {BatteryText(leftBattery),4} R {BatteryText(rightBattery),4}";
+                        HostSnapshot snapshot = Status.Snapshot();
+                        string batteryText = $"bat L {BatteryText(snapshot.LeftBattery),4} R {BatteryText(snapshot.RightBattery),4} [{snapshot.BatterySource}]";
                         Console.Write(
                             $"\r{hz,5:F1} Hz  seq {p.Sequence,8}  L {p.LX,6:F2},{p.LY,6:F2}  R {p.RX,6:F2},{p.RY,6:F2}  " +
                             $"LT {p.LT:F2} RT {p.RT:F2}  grip {p.LG:F2}/{p.RG:F2}  " +
@@ -428,19 +441,34 @@ internal static class Program
         return File.Exists(sdk) ? sdk : null;
     }
 
+    private static void FatalError(string message)
+    {
+#if QUESTPAD_GUI
+        MessageBox.Show(message, "QuestPad", MessageBoxButtons.OK, MessageBoxIcon.Error);
+#else
+        Console.Error.WriteLine(message);
+#endif
+    }
+
     private static void PrintHelp()
     {
-        Console.WriteLine("QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb] [--no-tray]");
-        Console.WriteLine("  --no-gamepad  transport/input diagnostic only; don't create XInput device");
-        Console.WriteLine("  --no-adb      assume tcp:38888 is already reachable (developer testing)");
-        Console.WriteLine("  --no-tray     disable the Windows notification-area status icon");
-        Console.WriteLine();
-        Console.WriteLine("Full-gamepad layer:");
-        Console.WriteLine("  Menu tap                -> Start/Menu");
-        Console.WriteLine("  hold Menu + right stick -> D-pad (diagonals supported)");
-        Console.WriteLine("  hold Menu + R3          -> Back/View");
-        Console.WriteLine("  hold Menu + LT + RT     -> Guide after 0.75 s");
-        Console.WriteLine("  LS + RS + LB + RB for 3 s -> exit QuestPad (haptic countdown)");
+        const string text =
+            "QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb] [--no-tray]\n" +
+            "  --no-gamepad  transport/input diagnostic only; don't create XInput device\n" +
+            "  --no-adb      assume tcp:38888 is already reachable (developer testing)\n" +
+            "  --no-tray     disable the Windows notification-area status icon\n\n" +
+            "Full-gamepad layer:\n" +
+            "  Menu tap                -> Start/Menu\n" +
+            "  hold Menu + right stick -> D-pad (diagonals supported)\n" +
+            "  hold Menu + R3          -> Back/View\n" +
+            "  hold Menu + LT + RT     -> Guide after 0.75 s\n" +
+            "  LS + RS + LB + RB for 3 s -> exit QuestPad (haptic countdown)\n\n" +
+            "For a real console window and diagnostic output use QuestPad.Host.Console.exe.";
+#if QUESTPAD_GUI
+        MessageBox.Show(text, "QuestPad command-line options", MessageBoxButtons.OK, MessageBoxIcon.Information);
+#else
+        Console.WriteLine(text);
+#endif
     }
 
     private readonly record struct Packet(
