@@ -75,6 +75,7 @@ internal static class Program
 
         ViGEmClient? vigem = null;
         IXbox360Controller? pad = null;
+        var mapper = new ControllerMapper();
         if (!noGamepad)
         {
             try
@@ -87,6 +88,7 @@ internal static class Program
                 pad.Connect();
                 Neutral(pad);
                 Console.WriteLine("Virtual Xbox 360 controller: connected");
+                Console.WriteLine("Full-gamepad layer: Menu tap=Start; Menu+RS=D-pad; Menu+R3=Back/View; Menu+LT+RT=Guide.");
             }
             catch (Exception ex)
             {
@@ -100,7 +102,7 @@ internal static class Program
 
         try
         {
-            await ReceiveLoopAsync(pad, Cancel.Token);
+            await ReceiveLoopAsync(pad, mapper, Cancel.Token);
         }
         finally
         {
@@ -118,7 +120,7 @@ internal static class Program
         return 0;
     }
 
-    private static async Task ReceiveLoopAsync(IXbox360Controller? pad, CancellationToken ct)
+    private static async Task ReceiveLoopAsync(IXbox360Controller? pad, ControllerMapper mapper, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -128,6 +130,7 @@ internal static class Program
                 Console.WriteLine("Waiting for QuestPad on Quest...");
                 await tcp.ConnectAsync("127.0.0.1", Port, ct);
                 Console.WriteLine("QuestPad transport connected");
+                mapper.Reset();
 
                 using NetworkStream stream = tcp.GetStream();
                 byte[] packet = new byte[PacketSize];
@@ -156,8 +159,15 @@ internal static class Program
                     {
                         // FLAG_FOCUSED = bit 1. Quest sends a neutral packet on focus loss,
                         // and the host independently enforces neutral state as a safety net.
-                        if ((p.Flags & 0x2u) == 0) Neutral(pad);
-                        else Apply(pad, p);
+                        if ((p.Flags & 0x2u) == 0)
+                        {
+                            mapper.Reset();
+                            Neutral(pad);
+                        }
+                        else
+                        {
+                            mapper.Apply(pad, p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
+                        }
                     }
 
                     long now = Stopwatch.GetTimestamp();
@@ -180,6 +190,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
+                mapper.Reset();
                 if (pad is not null)
                 {
                     try { Neutral(pad); } catch { }
@@ -349,6 +360,13 @@ internal static class Program
         Console.WriteLine("QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb]");
         Console.WriteLine("  --no-gamepad  transport/input diagnostic only; don't create XInput device");
         Console.WriteLine("  --no-adb      assume tcp:38888 is already reachable (developer testing)");
+        Console.WriteLine();
+        Console.WriteLine("Full-gamepad layer:");
+        Console.WriteLine("  Menu tap                -> Start/Menu");
+        Console.WriteLine("  hold Menu + right stick -> D-pad (diagonals supported)");
+        Console.WriteLine("  hold Menu + R3          -> Back/View");
+        Console.WriteLine("  hold Menu + LT + RT     -> Guide after 0.75 s");
+        Console.WriteLine("  both stick clicks + both grips for 3 s -> exit QuestPad");
     }
 
     private readonly record struct Packet(
