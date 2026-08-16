@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using Nefarius.ViGEm.Client.Targets;
-using Nefarius.ViGEm.Client.Targets.Xbox360;
 
 namespace QuestPad.Host;
 
@@ -52,8 +50,7 @@ internal sealed class ControllerMapper
         startPulseFrames = 0;
     }
 
-    public void Apply(
-        IXbox360Controller pad,
+    public LogicalGamepadState Map(
         uint buttons,
         float lx,
         float ly,
@@ -79,10 +76,6 @@ internal sealed class ControllerMapper
             ClearDpad();
         }
 
-        // View is a latched chord: Menu + R3 starts a real held Back/View button,
-        // and it remains held for as long as R3 itself stays physically depressed.
-        // This lets the user release Menu after initiating the chord, which is both
-        // more comfortable and friendlier to games that distinguish tap vs hold.
         if (viewHoldActive && !rightThumb)
             viewHoldActive = false;
 
@@ -97,9 +90,6 @@ internal sealed class ControllerMapper
 
         if (menu)
         {
-            // Once a plain Menu hold has committed to Start/Menu, keep that mode
-            // until release. This prevents a late camera movement from unexpectedly
-            // turning a held Start button into the D-pad modifier layer.
             if (!startHoldActive && !menuUsed && menuDownTicks != 0 &&
                 SecondsSince(menuDownTicks, nowTicks) >= MenuHoldSeconds)
             {
@@ -112,16 +102,12 @@ internal sealed class ControllerMapper
             }
             else
             {
-                // Ergonomic modifier layer: left thumb holds Menu while the right thumb
-                // gets an entire D-pad without requiring impossible same-hand chords.
                 if (Math.Abs(rx) >= DpadIntent || Math.Abs(ry) >= DpadIntent)
                     menuUsed = true;
 
                 UpdateDpad(rx, ry);
-                outRx = outRy = 0.0f; // never leak camera movement while using the D-pad layer
+                outRx = outRy = 0.0f;
 
-                // Menu + R3 -> Back/View. Activation latches until R3 is released,
-                // so long-press behavior is a genuine continuous Xbox Back/View hold.
                 if (rightThumb)
                 {
                     viewHoldActive = true;
@@ -130,13 +116,11 @@ internal sealed class ControllerMapper
                     menuUsed = true;
                 }
 
-                // The Meta/System button belongs to Horizon OS and is not a safe app binding.
-                // Menu + both triggers held deliberately for 750 ms supplies Xbox Guide.
                 bool guideChord = lt >= GuideTriggerThreshold && rt >= GuideTriggerThreshold;
                 if (guideChord)
                 {
                     menuUsed = true;
-                    outLt = outRt = 0.0f; // don't fire/brake in-game while invoking Guide
+                    outLt = outRt = 0.0f;
                     if (guideStartTicks == 0)
                         guideStartTicks = nowTicks;
                     guide = SecondsSince(guideStartTicks, nowTicks) >= GuideHoldSeconds;
@@ -151,9 +135,6 @@ internal sealed class ControllerMapper
         {
             if (menuWasDown)
             {
-                // A quick, otherwise-unused Menu press remains a normal Start/Menu tap.
-                // A committed long hold has already been sent continuously and must not
-                // generate another pulse on release.
                 if (!menuUsed && !startHoldActive)
                     startPulseFrames = StartPulseFrames;
                 ClearDpad();
@@ -170,42 +151,41 @@ internal sealed class ControllerMapper
         }
 
         menuWasDown = menu;
-
-        // Touch grips are analog, but Xbox shoulders are digital. Hysteresis avoids
-        // chatter around the threshold while keeping a natural squeeze gesture.
         leftShoulder = Hysteresis(leftShoulder, lg, ShoulderPress, ShoulderRelease);
         rightShoulder = Hysteresis(rightShoulder, rg, ShoulderPress, ShoulderRelease);
 
         var left = Radial(lx, ly);
         var right = Radial(outRx, outRy);
 
-        pad.ResetReport();
-        pad.SetAxisValue(Xbox360Axis.LeftThumbX, ToShort(left.x));
-        pad.SetAxisValue(Xbox360Axis.LeftThumbY, ToShort(left.y));
-        pad.SetAxisValue(Xbox360Axis.RightThumbX, ToShort(right.x));
-        pad.SetAxisValue(Xbox360Axis.RightThumbY, ToShort(right.y));
-        pad.SetSliderValue(Xbox360Slider.LeftTrigger, ToByte(outLt));
-        pad.SetSliderValue(Xbox360Slider.RightTrigger, ToByte(outRt));
-
-        Set(pad, Xbox360Button.LeftShoulder, leftShoulder);
-        Set(pad, Xbox360Button.RightShoulder, rightShoulder);
-        Set(pad, Xbox360Button.A, (buttons & BtnA) != 0);
-        Set(pad, Xbox360Button.B, (buttons & BtnB) != 0);
-        Set(pad, Xbox360Button.X, (buttons & BtnX) != 0);
-        Set(pad, Xbox360Button.Y, (buttons & BtnY) != 0);
-        Set(pad, Xbox360Button.LeftThumb, leftThumb);
-        Set(pad, Xbox360Button.RightThumb, outRightThumb);
-        Set(pad, Xbox360Button.Up, dpadUp);
-        Set(pad, Xbox360Button.Down, dpadDown);
-        Set(pad, Xbox360Button.Left, dpadLeft);
-        Set(pad, Xbox360Button.Right, dpadRight);
-        Set(pad, Xbox360Button.Back, view);
-        Set(pad, Xbox360Button.Start, startHeld || startPulseFrames > 0);
-        Set(pad, Xbox360Button.Guide, guide);
-        pad.SubmitReport();
+        var state = new LogicalGamepadState
+        {
+            LX = left.x,
+            LY = left.y,
+            RX = right.x,
+            RY = right.y,
+            LT = Math.Clamp(outLt, 0.0f, 1.0f),
+            RT = Math.Clamp(outRt, 0.0f, 1.0f),
+            LB = leftShoulder,
+            RB = rightShoulder,
+            A = (buttons & BtnA) != 0,
+            B = (buttons & BtnB) != 0,
+            X = (buttons & BtnX) != 0,
+            Y = (buttons & BtnY) != 0,
+            L3 = leftThumb,
+            R3 = outRightThumb,
+            DpadUp = dpadUp,
+            DpadDown = dpadDown,
+            DpadLeft = dpadLeft,
+            DpadRight = dpadRight,
+            View = view,
+            Menu = startHeld || startPulseFrames > 0,
+            Guide = guide
+        };
 
         if (startPulseFrames > 0)
             startPulseFrames--;
+
+        return state;
     }
 
     private void UpdateDpad(float x, float y)
@@ -215,7 +195,6 @@ internal sealed class ControllerMapper
         dpadUp = AxisHysteresis(dpadUp, y, true);
         dpadDown = AxisHysteresis(dpadDown, y, false);
 
-        // Diagonals are valid; opposite directions are not.
         if (dpadLeft && dpadRight)
         {
             if (x >= 0) dpadLeft = false;
@@ -238,19 +217,6 @@ internal sealed class ControllerMapper
         current ? value > release : value >= press;
 
     private void ClearDpad() => dpadUp = dpadDown = dpadLeft = dpadRight = false;
-
-    private static void Set(IXbox360Controller pad, Xbox360Button button, bool pressed) =>
-        pad.SetButtonState(button, pressed);
-
-    private static short ToShort(float value)
-    {
-        double x = Math.Clamp(value, -1.0f, 1.0f);
-        if (x <= -1.0) return short.MinValue;
-        return (short)Math.Round(x * short.MaxValue);
-    }
-
-    private static byte ToByte(float value) =>
-        (byte)Math.Clamp(Math.Round(Math.Clamp(value, 0.0f, 1.0f) * 255.0), 0, 255);
 
     private static (float x, float y) Radial(float x, float y)
     {
