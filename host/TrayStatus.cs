@@ -12,12 +12,18 @@ internal readonly record struct HostSnapshot(
     long Drops,
     string Thermal,
     int? LeftBattery,
-    int? RightBattery);
+    int? RightBattery,
+    string BatterySource);
 
 internal sealed class HostStatus
 {
     private readonly object _gate = new();
-    private HostSnapshot _value = new(false, false, false, 0, 0, "N/A", null, null);
+    private HostSnapshot _value = new(false, false, false, 0, 0, "N/A", null, null, "n/a");
+
+    private int? _openXrLeftBattery;
+    private int? _openXrRightBattery;
+    private int? _adbLeftBattery;
+    private int? _adbRightBattery;
 
     public HostSnapshot Snapshot()
     {
@@ -42,14 +48,53 @@ internal sealed class HostStatus
     public void UpdateTelemetry(double hz, long drops, string thermal, int? leftBattery, int? rightBattery)
     {
         lock (_gate)
+        {
+            // Prefer standards-based OpenXR battery telemetry when the runtime provides
+            // it. Current Horizon builds may omit it, in which case the host can fall
+            // back to the ADB-side controller status without touching the input path.
+            _openXrLeftBattery = leftBattery;
+            _openXrRightBattery = rightBattery;
+            ResolveBatteries(out int? resolvedLeft, out int? resolvedRight, out string source);
+
             _value = _value with
             {
                 Hz = hz,
                 Drops = drops,
                 Thermal = thermal,
-                LeftBattery = leftBattery,
-                RightBattery = rightBattery
+                LeftBattery = resolvedLeft,
+                RightBattery = resolvedRight,
+                BatterySource = source
             };
+        }
+    }
+
+    public void UpdateAdbBatteries(int? leftBattery, int? rightBattery)
+    {
+        lock (_gate)
+        {
+            _adbLeftBattery = leftBattery;
+            _adbRightBattery = rightBattery;
+            ResolveBatteries(out int? resolvedLeft, out int? resolvedRight, out string source);
+            _value = _value with
+            {
+                LeftBattery = resolvedLeft,
+                RightBattery = resolvedRight,
+                BatterySource = source
+            };
+        }
+    }
+
+    private void ResolveBatteries(out int? left, out int? right, out string source)
+    {
+        left = _openXrLeftBattery ?? _adbLeftBattery;
+        right = _openXrRightBattery ?? _adbRightBattery;
+
+        bool anyOpenXr = _openXrLeftBattery.HasValue || _openXrRightBattery.HasValue;
+        bool anyAdbFallback = (!_openXrLeftBattery.HasValue && _adbLeftBattery.HasValue) ||
+                              (!_openXrRightBattery.HasValue && _adbRightBattery.HasValue);
+        source = anyOpenXr && anyAdbFallback ? "OpenXR + ADB" :
+                 anyOpenXr ? "OpenXR" :
+                 anyAdbFallback ? "ADB" : "n/a";
     }
 }
 
@@ -87,6 +132,7 @@ internal sealed class TrayStatus : IDisposable
         var gamepad = new ToolStripMenuItem("Gamepad: starting") { Enabled = false };
         var leftBattery = new ToolStripMenuItem("Left controller: n/a") { Enabled = false };
         var rightBattery = new ToolStripMenuItem("Right controller: n/a") { Enabled = false };
+        var batterySource = new ToolStripMenuItem("Battery source: n/a") { Enabled = false };
         var thermal = new ToolStripMenuItem("Thermal: n/a") { Enabled = false };
         var cadence = new ToolStripMenuItem("Input: 0.0 Hz") { Enabled = false };
         var pause = new ToolStripMenuItem("Pause gamepad output") { CheckOnClick = true };
@@ -98,7 +144,7 @@ internal sealed class TrayStatus : IDisposable
         _menu.Items.AddRange(new ToolStripItem[]
         {
             title, new ToolStripSeparator(), connection, gamepad,
-            leftBattery, rightBattery, thermal, cadence,
+            leftBattery, rightBattery, batterySource, thermal, cadence,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
 
@@ -120,6 +166,7 @@ internal sealed class TrayStatus : IDisposable
                 s.GamepadPaused ? "Gamepad: paused" : "Gamepad: active";
             leftBattery.Text = $"Left controller: {BatteryText(s.LeftBattery)}";
             rightBattery.Text = $"Right controller: {BatteryText(s.RightBattery)}";
+            batterySource.Text = $"Battery source: {s.BatterySource}";
             thermal.Text = $"Thermal: {s.Thermal}";
             cadence.Text = $"Input: {s.Hz:F1} Hz   drops: {s.Drops}";
             if (pause.Checked != s.GamepadPaused) pause.Checked = s.GamepadPaused;
