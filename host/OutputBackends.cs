@@ -110,8 +110,9 @@ internal sealed class Xbox360Backend : IOutputBackend
 
     public void Dispose()
     {
+        // IXbox360Controller is not IDisposable in ViGEm.NET. Disconnect releases the
+        // bus target; the owning ViGEmClient is disposed by OutputBackendManager.
         try { pad.Disconnect(); } catch { }
-        pad.Dispose();
     }
 
     private void Set(Xbox360Button button, bool pressed) => pad.SetButtonState(button, pressed);
@@ -214,8 +215,6 @@ internal sealed class DualShock4Backend : IOutputBackend
         r[6] = s.Guide ? (byte)0x01 : (byte)0x00; // PS
         r[7] = ToByte01(s.LT);
         r[8] = ToByte01(s.RT);
-        // byte 11 battery/status: leave neutral/default. Controller battery is shown
-        // by QuestPad itself and is not the virtual DS4's battery.
         return r;
     }
 
