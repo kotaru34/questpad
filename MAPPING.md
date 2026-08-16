@@ -50,4 +50,8 @@ Hold **both stick clicks + both grips** for 3 seconds. This remains separate fro
 
 Touch Plus also exposes capacitive touch/proximity-style inputs and additional trigger sensing through OpenXR. They are useful signals, but a standard Xbox 360 gamepad has no direct equivalents. Mapping normal finger resting/touch state to gameplay buttons would make accidental input much more likely, so these are intentionally reserved for future optional profiles rather than enabled in the default mapping.
 
-Controller haptics are the next natural capability to bridge: ViGEm can report Xbox rumble requests and Touch Plus exposes OpenXR haptic output. This is separate from the input mapping so it can be added without changing the ergonomic control surface above.
+## Rumble / haptics
+
+QuestPad now also implements the reverse feedback path. ViGEm reports Xbox 360 large- and small-motor amplitudes to the Windows host; the host sends an 8-byte `QFB1` feedback packet back over the same full-duplex ADB-forwarded TCP connection. The Quest app maps the large motor to the left Touch Plus haptic actuator and the small motor to the right actuator, preserving both intensity channels. Haptics stop immediately on focus loss, disconnect, zero-rumble state, or app exit.
+
+This does not add another socket, another ADB forward, or another polling thread. Feedback is sampled alongside the already-running ~72 Hz controller stream, keeping the design low-overhead. Hardware feel/intensity still needs validation on the real Quest 3.
