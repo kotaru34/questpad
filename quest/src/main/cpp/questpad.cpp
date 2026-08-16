@@ -117,6 +117,13 @@ public:
 
     uint16_t pollRumble() {
         int fd = clientFd_.load(std::memory_order_relaxed);
+        // accept() runs on a separate thread. Keep the framing buffer entirely
+        // owned by this XR thread and reset it when the published client fd changes.
+        if (fd != feedbackFd_) {
+            feedbackFd_ = fd;
+            feedbackBytes_ = 0;
+            rumblePacked_.store(0, std::memory_order_relaxed);
+        }
         if (fd < 0) {
             rumblePacked_.store(0, std::memory_order_relaxed);
             feedbackBytes_ = 0;
@@ -233,7 +240,6 @@ private:
             const int old = clientFd_.exchange(c);
             if (old >= 0) close(old);
             rumblePacked_.store(0, std::memory_order_relaxed);
-            feedbackBytes_ = 0;
             int snd = 4096;
             setsockopt(c, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
             int noDelay = 1;
@@ -248,6 +254,7 @@ private:
     std::atomic<uint16_t> rumblePacked_{0};
     uint8_t feedbackBuf_[sizeof(RumblePacket)]{};
     size_t feedbackBytes_ = 0;
+    int feedbackFd_ = -1; // XR-thread-owned connection generation marker
     std::thread thread_;
 };
 
