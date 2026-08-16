@@ -19,11 +19,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.4'
-      - run: gradle :quest:assembleDebug --stacktrace
+      - name: Build QuestPad and motion probe
+        run: gradle :quest:assembleDebug :motionprobe:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: QuestPad-APK
           path: quest/build/outputs/apk/debug/quest-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-Motion-Probe-APK
+          path: motionprobe/build/outputs/apk/debug/motionprobe-debug.apk
 
   windows-host:
     runs-on: windows-latest
