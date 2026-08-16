@@ -1,0 +1,26 @@
+name: apply-battery-tray
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-battery-tray.yml'
+      - 'scripts/apply_battery_tray.py'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply battery/tray patch
+        run: python scripts/apply_battery_tray.py
+      - name: Commit patch
+        run: |
+          git config user.name 'questpad-ci'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m 'Add controller battery telemetry and Windows tray'
+          git push
