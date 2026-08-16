@@ -1,10 +1,8 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Numerics;
 using System.Windows.Forms;
-using Nefarius.ViGEm.Client;
-using Nefarius.ViGEm.Client.Targets;
-using Nefarius.ViGEm.Client.Targets.Xbox360;
 
 namespace QuestPad.Host;
 
@@ -12,16 +10,17 @@ internal static class Program
 {
     private const int Port = 38888;
     private const uint Magic = 0x44415051;
-    private const ushort Protocol = 1;
-    private const int PacketSize = 68;
+    private const ushort Protocol = 2;
+    private const int PacketSize = 152;
     private const uint FeedbackMagic = 0x31424651; // QFB1 little-endian
     private const int FeedbackSize = 8;
-    private static int RumblePacked; // high byte = large motor, low byte = small motor
-    private const double Deadzone = 0.08;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
     private static readonly HostStatus Status = new();
+    private static readonly RuntimeSettings Settings = new();
     private static volatile bool EmulationPaused;
+    private static volatile bool CalibrateSteeringRequested;
+    private static int RumblePacked; // high byte = large motor, low byte = small motor
 
     private static async Task<int> Main(string[] args)
     {
@@ -40,6 +39,24 @@ internal static class Program
                     break;
                 case "--serial" when i + 1 < args.Length:
                     serial = args[++i];
+                    break;
+                case "--output" when i + 1 < args.Length:
+                    Settings.SetOutput(ParseOutput(args[++i]));
+                    break;
+                case "--gyro" when i + 1 < args.Length:
+                    Settings.SetGyroSource(ParseGyro(args[++i]));
+                    break;
+                case "--gyro-smoothing" when i + 1 < args.Length:
+                    Settings.SetGyroSmoothing(ParseSmoothing(args[++i]));
+                    break;
+                case "--steering" when i + 1 < args.Length:
+                    Settings.SetSteering(ParseSteering(args[++i]));
+                    break;
+                case "--steering-smoothing" when i + 1 < args.Length:
+                    Settings.SetSteeringSmoothing(ParseSmoothing(args[++i]));
+                    break;
+                case "--steering-range" when i + 1 < args.Length && float.TryParse(args[++i], out float range):
+                    Settings.SetSteeringRange(range);
                     break;
                 case "--no-gamepad":
                     noGamepad = true;
@@ -65,6 +82,8 @@ internal static class Program
 
         using TrayStatus? tray = noTray ? null : new TrayStatus(
             Status,
+            Settings,
+            () => CalibrateSteeringRequested = true,
             paused =>
             {
                 EmulationPaused = paused;
@@ -84,7 +103,6 @@ internal static class Program
             }
 
             Console.WriteLine($"ADB: {adb}");
-            // Remove a stale local binding first. Failure is harmless if it didn't exist.
             RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
             if (!RunAdb(adb, serial, "forward", $"tcp:{Port}", $"tcp:{Port}"))
             {
@@ -93,61 +111,41 @@ internal static class Program
             }
         }
 
-        // The OpenXR battery extension is still kept as the preferred source. When
-        // Horizon does not expose valid controller battery data, the host can query
-        // the shell-side OVRRemoteService over the same ADB connection. This runs on
-        // a slow independent poller and never blocks controller packets or XInput.
         AdbControllerBatteryPoller? batteryPoller = adb is null
             ? null
             : new AdbControllerBatteryPoller(adb, serial, Status, Cancel.Token);
 
-        ViGEmClient? vigem = null;
-        IXbox360Controller? pad = null;
-        var mapper = new ControllerMapper();
+        OutputBackendManager? outputs = null;
         if (!noGamepad)
         {
             try
             {
-                vigem = new ViGEmClient();
-                pad = vigem.CreateXbox360Controller();
-                // We update the entire XInput report once per Quest sample. Leaving this at
-                // the library default would submit once for every individual axis/button setter.
-                pad.AutoSubmitReport = false;
-                pad.FeedbackReceived += (_, e) =>
-                    Volatile.Write(ref RumblePacked, (e.LargeMotor << 8) | e.SmallMotor);
-                pad.Connect();
-                Neutral(pad);
+                outputs = new OutputBackendManager((large, small) =>
+                    Volatile.Write(ref RumblePacked, (large << 8) | small));
+                IOutputBackend initial = outputs.Ensure(Settings.Snapshot().Output);
                 Status.SetGamepadAvailable(true);
-                Console.WriteLine("Virtual Xbox 360 controller: connected");
-                Console.WriteLine("Full-gamepad layer: Menu tap=Start; Menu+RS=D-pad; Menu+R3=Back/View; Menu+LT+RT=Guide.");
-                Console.WriteLine("Rumble bridge: Xbox large/small motors -> left/right Touch Plus haptics.");
+                Status.SetOutputBackend(initial.Name);
+                Console.WriteLine($"Virtual controller: {initial.Name}");
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine("ViGEm unavailable: " + ex.Message);
                 Console.Error.WriteLine("Install ViGEmBus, or use --no-gamepad for transport diagnostics.");
-                vigem?.Dispose();
-                vigem = null;
-                pad = null;
+                outputs?.Dispose();
+                outputs = null;
                 Status.SetGamepadAvailable(false);
             }
         }
 
         try
         {
-            await ReceiveLoopAsync(pad, mapper, Cancel.Token);
+            await ReceiveLoopAsync(outputs, Cancel.Token);
         }
         finally
         {
             if (batteryPoller is not null)
                 await batteryPoller.DisposeAsync();
-
-            if (pad is not null)
-            {
-                try { Neutral(pad); } catch { }
-                try { pad.Disconnect(); } catch { }
-            }
-            vigem?.Dispose();
+            outputs?.Dispose();
             if (adb is not null)
                 RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
             Console.WriteLine("\nQuestPad host stopped");
@@ -156,8 +154,11 @@ internal static class Program
         return 0;
     }
 
-    private static async Task ReceiveLoopAsync(IXbox360Controller? pad, ControllerMapper mapper, CancellationToken ct)
+    private static async Task ReceiveLoopAsync(OutputBackendManager? outputs, CancellationToken ct)
     {
+        var mapper = new ControllerMapper();
+        var motionProcessor = new MotionProcessor();
+
         while (!ct.IsCancellationRequested)
         {
             try
@@ -167,24 +168,25 @@ internal static class Program
                 Console.WriteLine("Waiting for QuestPad on Quest...");
                 await tcp.ConnectAsync("127.0.0.1", Port, ct);
                 Status.SetConnection(true);
-                Console.WriteLine("QuestPad transport connected");
+                Console.WriteLine("QuestPad transport connected (protocol v2 motion-capable)");
                 mapper.Reset();
+                motionProcessor.Reset();
 
                 using NetworkStream stream = tcp.GetStream();
-                byte[] packet = new byte[PacketSize];
+                byte[] packetBytes = new byte[PacketSize];
                 uint? previousSeq = null;
-                int lastSentRumble = -1;
-                long lastRumbleSendTicks = 0;
+                int lastFeedbackKey = int.MinValue;
+                long lastFeedbackTicks = 0;
                 long lastPrintTicks = Stopwatch.GetTimestamp();
                 long windowPackets = 0;
                 long dropped = 0;
 
                 while (!ct.IsCancellationRequested)
                 {
-                    await ReadExactlyWithTimeoutAsync(stream, packet, PacketWatchdog, ct);
-                    var p = Parse(packet);
+                    await ReadExactlyWithTimeoutAsync(stream, packetBytes, PacketWatchdog, ct);
+                    Packet p = Parse(packetBytes);
                     if (p.Magic != Magic || p.Version != Protocol || p.Size != PacketSize)
-                        throw new IOException($"Protocol mismatch: magic=0x{p.Magic:X8} version={p.Version} size={p.Size}");
+                        throw new IOException($"Protocol mismatch: magic=0x{p.Magic:X8} version={p.Version} size={p.Size}; install the matching QuestPad APK");
 
                     if (previousSeq.HasValue)
                     {
@@ -195,39 +197,71 @@ internal static class Program
                     previousSeq = p.Sequence;
                     windowPackets++;
 
-                    // ViGEm's feedback callback may run on another thread. Ship the
-                    // latest two motor amplitudes back over the same full-duplex TCP
-                    // connection. A 100 ms keepalive also guarantees that the Quest
-                    // eventually learns the current state after any transient loss.
-                    int rumble = pad is null ? 0 : Volatile.Read(ref RumblePacked);
+                    RuntimeSettingsSnapshot cfg = Settings.Snapshot();
+                    ushort control = HostControlBits.For(cfg);
+                    int rumble = outputs is null ? 0 : Volatile.Read(ref RumblePacked);
+                    int feedbackKey = (rumble << 16) | control;
                     long feedbackNow = Stopwatch.GetTimestamp();
-                    if (rumble != lastSentRumble ||
-                        SecondsSince(lastRumbleSendTicks, feedbackNow) >= 0.100)
+                    if (feedbackKey != lastFeedbackKey || SecondsSince(lastFeedbackTicks, feedbackNow) >= 0.100)
                     {
-                        await SendFeedbackAsync(stream, rumble, ct);
-                        lastSentRumble = rumble;
-                        lastRumbleSendTicks = feedbackNow;
+                        await SendFeedbackAsync(stream, rumble, control, ct);
+                        lastFeedbackKey = feedbackKey;
+                        lastFeedbackTicks = feedbackNow;
                     }
 
-                    if (pad is not null)
+                    MotionFrame motionFrame = ToMotionFrame(p);
+                    if (CalibrateSteeringRequested)
                     {
-                        if (EmulationPaused)
+                        CalibrateSteeringRequested = false;
+                        motionProcessor.CalibrateSteering(motionFrame);
+                        Console.WriteLine("\nSteering center captured; turn the wheel left/right briefly so QuestPad can learn its physical rotation axis.");
+                    }
+
+                    ProcessedMotion motion = motionProcessor.Process(motionFrame, cfg);
+                    string gyroText = cfg.GyroSource switch
+                    {
+                        GyroSourceMode.CameraAssisted => $"camera-assisted {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
+                        GyroSourceMode.AngularRate => $"angular-rate {(motion.GyroValid ? "valid" : "waiting for AV=1")}",
+                        _ => "off"
+                    };
+                    Status.UpdateMotionStatus(motion.GyroValid, gyroText, cfg.Steering == SteeringMode.Off ? "off" : motion.SteeringState);
+
+                    IOutputBackend? backend = null;
+                    if (outputs is not null)
+                    {
+                        try
                         {
-                            mapper.Reset();
-                            Volatile.Write(ref RumblePacked, 0);
-                            Neutral(pad);
+                            backend = outputs.Ensure(cfg.Output);
+                            Status.SetOutputBackend(backend.Name);
                         }
-                        // FLAG_FOCUSED = bit 1. Quest sends a neutral packet on focus loss,
-                        // and the host independently enforces neutral state as a safety net.
-                        else if ((p.Flags & 0x2u) == 0)
+                        catch (Exception ex)
+                        {
+                            Status.SetGamepadAvailable(false);
+                            throw new IOException("failed to switch virtual controller backend: " + ex.Message, ex);
+                        }
+                    }
+
+                    if (backend is not null)
+                    {
+                        if (EmulationPaused || (p.Flags & 0x2u) == 0)
                         {
                             mapper.Reset();
                             Volatile.Write(ref RumblePacked, 0);
-                            Neutral(pad);
+                            backend.Neutral();
                         }
                         else
                         {
-                            mapper.Apply(pad, p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
+                            LogicalGamepadState state = mapper.Map(
+                                p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
+
+                            // Wheel mode replaces only steering. Every other gamepad control
+                            // remains live. If tracking is unavailable for >500 ms the
+                            // estimator marks itself invalid and the physical left stick is
+                            // an immediate fallback rather than an abrupt auto-centering car.
+                            if (cfg.Steering != SteeringMode.Off && motion.SteeringValid)
+                                state.LX = motion.SteeringNormalized;
+
+                            backend.Apply(state, motion);
                         }
                     }
 
@@ -243,9 +277,9 @@ internal static class Program
                         HostSnapshot snapshot = Status.Snapshot();
                         string batteryText = $"bat L {BatteryText(snapshot.LeftBattery),4} R {BatteryText(snapshot.RightBattery),4} [{snapshot.BatterySource}]";
                         Console.Write(
-                            $"\r{hz,5:F1} Hz  seq {p.Sequence,8}  L {p.LX,6:F2},{p.LY,6:F2}  R {p.RX,6:F2},{p.RY,6:F2}  " +
-                            $"LT {p.LT:F2} RT {p.RT:F2}  grip {p.LG:F2}/{p.RG:F2}  " +
-                            $"{batteryText}  therm {ThermalName(p.Thermal),8}  drops {dropped}      ");
+                            $"\r{hz,5:F1} Hz seq {p.Sequence,8} {snapshot.OutputBackend,-28} " +
+                            $"gyro {gyroText,-31} steer {snapshot.SteeringStatus,-30} " +
+                            $"{batteryText} therm {ThermalName(p.Thermal),8} drops {dropped}      ");
                     }
                 }
             }
@@ -257,11 +291,9 @@ internal static class Program
             {
                 Status.SetConnection(false);
                 mapper.Reset();
+                motionProcessor.Reset();
                 Volatile.Write(ref RumblePacked, 0);
-                if (pad is not null)
-                {
-                    try { Neutral(pad); } catch { }
-                }
+                try { outputs?.Current?.Neutral(); } catch { }
                 Console.WriteLine($"\ntransport lost/watchdog fired: {ex.Message}; reconnecting...");
                 try { await Task.Delay(500, ct); }
                 catch (OperationCanceledException) { break; }
@@ -269,13 +301,39 @@ internal static class Program
         }
     }
 
-    private static async Task SendFeedbackAsync(NetworkStream stream, int packed, CancellationToken ct)
+    private static MotionFrame ToMotionFrame(Packet p)
+    {
+        MotionValidity f = (MotionValidity)p.MotionFlags;
+        ControllerMotion left = new(
+            f.HasFlag(MotionValidity.LeftActive),
+            f.HasFlag(MotionValidity.LeftOrientationValid),
+            f.HasFlag(MotionValidity.LeftOrientationTracked),
+            f.HasFlag(MotionValidity.LeftPositionValid),
+            f.HasFlag(MotionValidity.LeftPositionTracked),
+            f.HasFlag(MotionValidity.LeftAngularValid),
+            p.LeftOrientation,
+            p.LeftPosition,
+            p.LeftAngularLocal);
+        ControllerMotion right = new(
+            f.HasFlag(MotionValidity.RightActive),
+            f.HasFlag(MotionValidity.RightOrientationValid),
+            f.HasFlag(MotionValidity.RightOrientationTracked),
+            f.HasFlag(MotionValidity.RightPositionValid),
+            f.HasFlag(MotionValidity.RightPositionTracked),
+            f.HasFlag(MotionValidity.RightAngularValid),
+            p.RightOrientation,
+            p.RightPosition,
+            p.RightAngularLocal);
+        return new MotionFrame(p.MonotonicNs, left, right);
+    }
+
+    private static async Task SendFeedbackAsync(NetworkStream stream, int packed, ushort control, CancellationToken ct)
     {
         byte[] feedback = new byte[FeedbackSize];
         BinaryPrimitives.WriteUInt32LittleEndian(feedback.AsSpan(0, 4), FeedbackMagic);
         feedback[4] = (byte)((packed >> 8) & 0xFF);
         feedback[5] = (byte)(packed & 0xFF);
-        // bytes 6..7 reserved
+        BinaryPrimitives.WriteUInt16LittleEndian(feedback.AsSpan(6, 2), control);
         await stream.WriteAsync(feedback, ct);
     }
 
@@ -303,6 +361,8 @@ internal static class Program
     {
         static float F32(ReadOnlySpan<byte> s, int offset) =>
             BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(s.Slice(offset, 4)));
+        static Vector3 V3(ReadOnlySpan<byte> s, int offset) => new(F32(s, offset), F32(s, offset + 4), F32(s, offset + 8));
+        static Quaternion Q(ReadOnlySpan<byte> s, int offset) => new(F32(s, offset), F32(s, offset + 4), F32(s, offset + 8), F32(s, offset + 12));
 
         return new Packet(
             BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(0, 4)),
@@ -315,58 +375,9 @@ internal static class Program
             F32(b, 28), F32(b, 32), F32(b, 36), F32(b, 40),
             F32(b, 44), F32(b, 48), F32(b, 52), F32(b, 56),
             BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(60, 4)),
-            BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(64, 4)));
-    }
-
-    private static void Apply(IXbox360Controller pad, Packet p)
-    {
-        var (lx, ly) = Radial(p.LX, p.LY);
-        var (rx, ry) = Radial(p.RX, p.RY);
-
-        pad.ResetReport();
-        pad.SetAxisValue(Xbox360Axis.LeftThumbX, ToShort(lx));
-        pad.SetAxisValue(Xbox360Axis.LeftThumbY, ToShort(ly));
-        pad.SetAxisValue(Xbox360Axis.RightThumbX, ToShort(rx));
-        pad.SetAxisValue(Xbox360Axis.RightThumbY, ToShort(ry));
-        pad.SetSliderValue(Xbox360Slider.LeftTrigger, ToByte(p.LT));
-        pad.SetSliderValue(Xbox360Slider.RightTrigger, ToByte(p.RT));
-
-        Set(pad, Xbox360Button.LeftShoulder, p.LG > 0.55f);
-        Set(pad, Xbox360Button.RightShoulder, p.RG > 0.55f);
-        Set(pad, Xbox360Button.A, (p.Buttons & (1u << 0)) != 0);
-        Set(pad, Xbox360Button.B, (p.Buttons & (1u << 1)) != 0);
-        Set(pad, Xbox360Button.X, (p.Buttons & (1u << 2)) != 0);
-        Set(pad, Xbox360Button.Y, (p.Buttons & (1u << 3)) != 0);
-        Set(pad, Xbox360Button.LeftThumb, (p.Buttons & (1u << 4)) != 0);
-        Set(pad, Xbox360Button.RightThumb, (p.Buttons & (1u << 5)) != 0);
-        Set(pad, Xbox360Button.Start, (p.Buttons & (1u << 6)) != 0);
-        pad.SubmitReport();
-    }
-
-    private static void Neutral(IXbox360Controller pad)
-    {
-        pad.ResetReport();
-        pad.SubmitReport();
-    }
-
-    private static void Set(IXbox360Controller p, Xbox360Button b, bool on) => p.SetButtonState(b, on);
-
-    private static short ToShort(float v)
-    {
-        double x = Math.Clamp(v, -1.0f, 1.0f);
-        if (x <= -1.0) return short.MinValue;
-        return (short)Math.Round(x * short.MaxValue);
-    }
-
-    private static byte ToByte(float v) => (byte)Math.Clamp(Math.Round(Math.Clamp(v, 0.0f, 1.0f) * 255.0), 0, 255);
-
-    private static (float x, float y) Radial(float x, float y)
-    {
-        double m = Math.Sqrt(x * x + y * y);
-        if (m <= Deadzone) return (0, 0);
-        double scaled = Math.Min(1.0, (m - Deadzone) / (1.0 - Deadzone));
-        double k = scaled / m;
-        return ((float)(x * k), (float)(y * k));
+            BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(64, 4)),
+            BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(68, 4)),
+            Q(b, 72), Q(b, 88), V3(b, 104), V3(b, 116), V3(b, 128), V3(b, 140));
     }
 
     private static string ThermalName(int t) => t switch
@@ -383,9 +394,36 @@ internal static class Program
     }
 
     private static string BatteryText(int? value) => value.HasValue ? $"{value.Value}%" : "n/a";
+    private static double SecondsSince(long oldTicks, long newTicks) => (newTicks - oldTicks) / (double)Stopwatch.Frequency;
 
-    private static double SecondsSince(long oldTicks, long newTicks) =>
-        (newTicks - oldTicks) / (double)Stopwatch.Frequency;
+    private static OutputMode ParseOutput(string value) => value.ToLowerInvariant() switch
+    {
+        "ds4" or "dualshock4" or "playstation" => OutputMode.DualShock4,
+        _ => OutputMode.Xbox360
+    };
+
+    private static GyroSourceMode ParseGyro(string value) => value.ToLowerInvariant() switch
+    {
+        "camera" or "tracked" or "camera-assisted" => GyroSourceMode.CameraAssisted,
+        "rate" or "angular" or "gyro" => GyroSourceMode.AngularRate,
+        _ => GyroSourceMode.Off
+    };
+
+    private static SteeringMode ParseSteering(string value) => value.ToLowerInvariant() switch
+    {
+        "mounted" or "rigid" => SteeringMode.Mounted,
+        "freeair" or "free-air" or "optical" => SteeringMode.FreeAir,
+        "hybrid" or "auto" => SteeringMode.Hybrid,
+        _ => SteeringMode.Off
+    };
+
+    private static SmoothingLevel ParseSmoothing(string value) => value.ToLowerInvariant() switch
+    {
+        "light" => SmoothingLevel.Light,
+        "medium" => SmoothingLevel.Medium,
+        "strong" => SmoothingLevel.Strong,
+        _ => SmoothingLevel.Off
+    };
 
     private static bool RunAdb(string adb, string? serial, params string[] arguments)
     {
@@ -404,7 +442,6 @@ internal static class Program
                 psi.ArgumentList.Add(serial);
             }
             foreach (string arg in arguments) psi.ArgumentList.Add(arg);
-
             using var p = Process.Start(psi);
             if (p is null) return false;
             if (!p.WaitForExit(5000))
@@ -414,10 +451,7 @@ internal static class Program
             }
             return p.ExitCode == 0;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private static string? FindAdb(string? explicitPath)
@@ -453,17 +487,23 @@ internal static class Program
     private static void PrintHelp()
     {
         const string text =
-            "QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb] [--no-tray]\n" +
-            "  --no-gamepad  transport/input diagnostic only; don't create XInput device\n" +
-            "  --no-adb      assume tcp:38888 is already reachable (developer testing)\n" +
-            "  --no-tray     disable the Windows notification-area status icon\n\n" +
-            "Full-gamepad layer:\n" +
-            "  Menu tap                -> Start/Menu\n" +
-            "  hold Menu + right stick -> D-pad (diagonals supported)\n" +
-            "  hold Menu + R3          -> Back/View\n" +
-            "  hold Menu + LT + RT     -> Guide after 0.75 s\n" +
-            "  LS + RS + LB + RB for 3 s -> exit QuestPad (haptic countdown)\n\n" +
-            "For a real console window and diagnostic output use QuestPad.Host.Console.exe.";
+            "QuestPad.Host [options]\n" +
+            "  --adb PATH                 adb.exe path\n" +
+            "  --serial SERIAL            select Android device\n" +
+            "  --output xbox|ds4          virtual controller backend\n" +
+            "  --gyro off|camera|rate     right-Touch native gyro source\n" +
+            "  --gyro-smoothing off|light|medium|strong\n" +
+            "  --steering off|mounted|freeair|hybrid\n" +
+            "  --steering-range DEG       total lock-to-lock range (60..1080)\n" +
+            "  --steering-smoothing off|light|medium|strong\n" +
+            "  --no-gamepad               transport/motion diagnostic only\n" +
+            "  --no-adb                   assume tcp:38888 is already forwarded\n" +
+            "  --no-tray                  console-only mode\n\n" +
+            "Gyro 'camera' derives rate from tracked pose and deliberately requires PT=1.\n" +
+            "Gyro 'rate' consumes only controller-local OpenXR angular velocity; it is not raw MEMS.\n" +
+            "Selecting a non-off gyro source automatically selects the DS4 backend.\n" +
+            "After a Quest reboot, Horizon currently needs to see the controller once before motion becomes valid.\n" +
+            "For a real console window use QuestPad.Host.Console.exe.";
 #if QUESTPAD_GUI
         MessageBox.Show(text, "QuestPad command-line options", MessageBoxButtons.OK, MessageBoxIcon.Information);
 #else
@@ -472,6 +512,28 @@ internal static class Program
     }
 
     private readonly record struct Packet(
-        uint Magic, ushort Version, ushort Size, uint Sequence, uint Flags, ulong MonotonicNs, int Thermal,
-        float LX, float LY, float RX, float RY, float LT, float RT, float LG, float RG, uint Buttons, uint Reserved);
+        uint Magic,
+        ushort Version,
+        ushort Size,
+        uint Sequence,
+        uint Flags,
+        ulong MonotonicNs,
+        int Thermal,
+        float LX,
+        float LY,
+        float RX,
+        float RY,
+        float LT,
+        float RT,
+        float LG,
+        float RG,
+        uint Buttons,
+        uint Reserved,
+        uint MotionFlags,
+        Quaternion LeftOrientation,
+        Quaternion RightOrientation,
+        Vector3 LeftPosition,
+        Vector3 RightPosition,
+        Vector3 LeftAngularLocal,
+        Vector3 RightAngularLocal);
 }
