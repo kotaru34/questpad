@@ -13,10 +13,12 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
 - ~72 Hz controller sampling on Quest.
 - USB/ADB transport with `TCP_NODELAY`, reconnect, and watchdog safety.
 - No scene rendering and zero submitted composition layers.
-- Low CPU/GPU performance hints, thermal telemetry, and controller battery display when supported by the runtime.
+- Low CPU/GPU performance hints and thermal telemetry.
+- Controller battery display with OpenXR first and a best-effort ADB fallback for Horizon runtimes that do not expose OpenXR battery data yet.
 - Analog sticks and triggers, face buttons, shoulders, stick clicks, D-pad layer, Start/View/Guide.
 - Xbox rumble bridged back to Touch Plus haptics.
-- Windows notification-area tray with connection, thermal, input-rate and controller-battery status plus pause/exit controls.
+- Tray-first Windows UI with connection, gamepad, thermal, input-rate, drop-count and controller-battery status plus pause/exit controls.
+- Separate console build for command-line flags, diagnostics and logs.
 - Focus loss and transport loss force a neutral controller state.
 - Deliberate `LS + RS + LB + RB` 3-second exit gesture with haptic countdown cues.
 
@@ -38,7 +40,7 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
 
 ## Quick start
 
-1. Build or download `quest-debug.apk` and `QuestPad.Host.exe` from the GitHub Actions build artifacts.
+1. Build or download `quest-debug.apk`, `QuestPad.Host.exe`, and `QuestPad.Host.Console.exe` from the GitHub Actions artifacts.
 2. Install/update the Quest app:
 
    ```powershell
@@ -46,21 +48,22 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
    ```
 
 3. Start **QuestPad** from Developer / Unknown Sources on the headset.
-4. Start the Windows host:
-
-   ```powershell
-   .\QuestPad.Host.exe --adb "C:\path\to\adb.exe"
-   ```
-
-   If `adb.exe` is already in `PATH`, simply run:
-
-   ```powershell
-   .\QuestPad.Host.exe
-   ```
-
+4. Start `QuestPad.Host.exe` on Windows. The normal build is tray-only and does not open a terminal window.
 5. Windows should now expose a virtual Xbox 360 controller. `joy.cpl` is a convenient way to verify it before launching a game.
 
-The host automatically creates the ADB forward to `tcp:38888` and reconnects after temporary transport loss. A tray icon is enabled by default; use `--no-tray` for console-only operation.
+If `adb.exe` is not in `PATH`, launch the host with an explicit path:
+
+```powershell
+.\QuestPad.Host.exe --adb "C:\path\to\adb.exe"
+```
+
+The tray build accepts the same command-line flags, but intentionally has no console output. For logs, diagnostics, scripting, or `--help`, use the console companion:
+
+```powershell
+.\QuestPad.Host.Console.exe --adb "C:\path\to\adb.exe"
+```
+
+The host automatically creates the ADB forward to `tcp:38888` and reconnects after temporary transport loss.
 
 ## Default controls
 
@@ -100,6 +103,14 @@ QuestPad forwards Xbox 360 rumble back to the Touch Plus controllers:
 
 Rumble is stopped on focus loss, disconnect, or exit.
 
+## Controller battery telemetry
+
+QuestPad prefers the ratified `XR_EXT_interaction_profile_battery_state_display` OpenXR extension. If the installed Horizon runtime does not return valid battery data, the Windows host falls back to querying the paired controller status over the existing ADB connection.
+
+The tray shows both controller percentages and the active source (`OpenXR`, `ADB`, or a mixed fallback). The ADB fallback is deliberately isolated from the real-time input loop and polls only every 10 seconds, so battery monitoring cannot add controller latency.
+
+The ADB-side service is a Horizon implementation detail rather than a public API. If Meta changes or removes it in a future OS release, controller battery display may return to `n/a`; the gamepad bridge itself is unaffected.
+
 ## Thermal / display design
 
 QuestPad is intentionally not a VR renderer. The Quest application:
@@ -114,6 +125,21 @@ QuestPad is intentionally not a VR renderer. The Quest application:
 
 A true display-power-off mode is not enabled by default because Horizon may suspend or de-focus the immersive OpenXR session, which would stop controller input. The current approach prioritizes stable input while keeping application-side GPU load effectively minimal.
 
+## Windows tray
+
+`QuestPad.Host.exe` is the normal desktop build. It runs without a console window and exposes status through the Windows notification area:
+
+- Quest transport connection;
+- virtual gamepad active / paused / unavailable;
+- left and right controller battery;
+- battery telemetry source;
+- Quest thermal state;
+- live input rate and packet-drop count;
+- **Pause gamepad output**;
+- **Exit QuestPad Host**.
+
+For terminal use, use `QuestPad.Host.Console.exe`. Both executables share the same controller, transport and safety code.
+
 ## Safety behavior
 
 QuestPad is fail-safe by default:
@@ -121,7 +147,21 @@ QuestPad is fail-safe by default:
 - OpenXR focus loss → neutral gamepad state.
 - USB/TCP loss or a 250 ms packet watchdog timeout → neutral gamepad state and reconnect.
 - Exit gesture → LS/RS/LB/RB are suppressed while armed, then a final neutral state is sent before exit.
+- Pausing from the Windows tray → neutral gamepad state and rumble off.
 - Quest transport is bound to loopback and reached from Windows through ADB forwarding.
+
+## Command-line options
+
+```text
+--adb PATH       explicit adb.exe path
+--serial SERIAL  select a Quest when multiple Android devices are connected
+--no-gamepad     transport/input diagnostics only; do not create XInput device
+--no-adb         assume tcp:38888 is already reachable
+--no-tray        disable the notification-area icon
+--help, -h       show help
+```
+
+Use `QuestPad.Host.Console.exe` when command-line output is needed.
 
 ## Building
 
@@ -135,20 +175,26 @@ The Quest app is native C++/OpenXR with Gradle + CMake and targets `arm64-v8a`.
 gradle :quest:assembleDebug
 ```
 
-### Windows host
+### Windows tray host
 
 ```powershell
 dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+```
+
+### Windows console host
+
+```powershell
+dotnet publish host/QuestPad.Host.Console.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
 No Visual Studio or Android Studio is required when using the GitHub Actions artifacts.
 
 ## Diagnostics
 
-Transport-only testing is available without ViGEm:
+For verbose transport testing without ViGEm:
 
 ```powershell
-.\QuestPad.Host.exe --no-gamepad
+.\QuestPad.Host.Console.exe --no-gamepad
 ```
 
 The independent diagnostic client in [`diagnostic/`](diagnostic/) can also validate the Quest → ADB → Windows path.
@@ -171,7 +217,7 @@ QuestPad is an early public project. Real Quest 3 testing has confirmed:
 - successful control of a real Windows game through XInput;
 - working game rumble on Touch Plus controllers.
 
-Controller battery display uses the optional ratified OpenXR battery-state extension and therefore appears as `n/a` if the installed Quest runtime does not expose it. Longer thermal/transport soak testing and broader game compatibility testing are still in progress. See [BUILD_STATUS.md](BUILD_STATUS.md).
+Longer thermal/transport soak testing and broader game compatibility testing are still in progress. See [BUILD_STATUS.md](BUILD_STATUS.md).
 
 ## Protocol
 
