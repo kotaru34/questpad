@@ -32,8 +32,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/host
+      - name: Publish tray host
+        run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
+      - name: Publish console host
+        run: dotnet publish host/QuestPad.Host.Console.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/console
+      - name: Assemble Windows package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/package | Out-Null
+          Copy-Item dist/tray/QuestPad.Host.exe dist/package/QuestPad.Host.exe
+          Copy-Item dist/console/QuestPad.Host.Console.exe dist/package/QuestPad.Host.Console.exe
       - uses: actions/upload-artifact@v4
         with:
           name: QuestPad-Host-win-x64
-          path: dist/host/QuestPad.Host.exe
+          path: dist/package/*
