@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace QuestPad.Host;
@@ -62,6 +63,8 @@ internal sealed class TrayStatus : IDisposable
     private volatile bool _disposed;
     private ApplicationContext? _context;
     private NotifyIcon? _icon;
+    private ContextMenuStrip? _menu;
+    private Icon? _trayIcon;
 
     public TrayStatus(HostStatus status, Action<bool> setPaused, Action exit)
     {
@@ -78,7 +81,10 @@ internal sealed class TrayStatus : IDisposable
     {
         _context = new ApplicationContext();
 
+        var title = new ToolStripMenuItem("QuestPad") { Enabled = false };
+        title.Font = new Font(title.Font, FontStyle.Bold);
         var connection = new ToolStripMenuItem("Quest: waiting") { Enabled = false };
+        var gamepad = new ToolStripMenuItem("Gamepad: starting") { Enabled = false };
         var leftBattery = new ToolStripMenuItem("Left controller: n/a") { Enabled = false };
         var rightBattery = new ToolStripMenuItem("Right controller: n/a") { Enabled = false };
         var thermal = new ToolStripMenuItem("Thermal: n/a") { Enabled = false };
@@ -88,18 +94,20 @@ internal sealed class TrayStatus : IDisposable
         var exit = new ToolStripMenuItem("Exit QuestPad Host");
         exit.Click += (_, _) => _exit();
 
-        var menu = new ContextMenuStrip();
-        menu.Items.AddRange(new ToolStripItem[]
+        _menu = new ContextMenuStrip();
+        _menu.Items.AddRange(new ToolStripItem[]
         {
-            connection, leftBattery, rightBattery, thermal, cadence,
+            title, new ToolStripSeparator(), connection, gamepad,
+            leftBattery, rightBattery, thermal, cadence,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
 
+        _trayIcon = CreateTrayIcon();
         _icon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = _trayIcon,
             Text = "QuestPad — waiting for Quest",
-            ContextMenuStrip = menu,
+            ContextMenuStrip = _menu,
             Visible = true
         };
 
@@ -108,6 +116,8 @@ internal sealed class TrayStatus : IDisposable
         {
             var s = _status.Snapshot();
             connection.Text = s.Connected ? "Quest: connected" : "Quest: waiting";
+            gamepad.Text = !s.GamepadAvailable ? "Gamepad: unavailable" :
+                s.GamepadPaused ? "Gamepad: paused" : "Gamepad: active";
             leftBattery.Text = $"Left controller: {BatteryText(s.LeftBattery)}";
             rightBattery.Text = $"Right controller: {BatteryText(s.RightBattery)}";
             thermal.Text = $"Thermal: {s.Thermal}";
@@ -115,7 +125,7 @@ internal sealed class TrayStatus : IDisposable
             if (pause.Checked != s.GamepadPaused) pause.Checked = s.GamepadPaused;
             pause.Enabled = s.GamepadAvailable;
 
-            string state = s.Connected ? "connected" : "waiting";
+            string state = !s.Connected ? "waiting" : s.GamepadPaused ? "paused" : "connected";
             string bat = $"L {BatteryText(s.LeftBattery)} R {BatteryText(s.RightBattery)}";
             string text = $"QuestPad — {state} — {bat}";
             _icon.Text = text.Length <= 127 ? text : text[..127];
@@ -124,10 +134,42 @@ internal sealed class TrayStatus : IDisposable
         _ready.Set();
         Application.Run(_context);
         timer.Stop();
+
         _icon.Visible = false;
         _icon.Dispose();
-        menu.Dispose();
+        _icon = null;
+        _menu.Dispose();
+        _menu = null;
+        _trayIcon.Dispose();
+        _trayIcon = null;
         timer.Dispose();
+    }
+
+    private static Icon CreateTrayIcon()
+    {
+        using var bitmap = new Bitmap(32, 32);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            using var background = new SolidBrush(Color.FromArgb(22, 112, 220));
+            g.FillEllipse(background, 1, 1, 30, 30);
+            using var font = new Font("Segoe UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var text = new SolidBrush(Color.White);
+            var size = g.MeasureString("Q", font);
+            g.DrawString("Q", font, text, (32 - size.Width) / 2f, (32 - size.Height) / 2f - 1f);
+        }
+
+        IntPtr handle = bitmap.GetHicon();
+        try
+        {
+            using Icon temporary = Icon.FromHandle(handle);
+            return (Icon)temporary.Clone();
+        }
+        finally
+        {
+            DestroyIcon(handle);
+        }
     }
 
     private static string BatteryText(int? value) => value.HasValue ? $"{value.Value}%" : "n/a";
@@ -136,11 +178,18 @@ internal sealed class TrayStatus : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_context is not null)
+        try
         {
-            try { _context.ExitThread(); } catch { }
+            if (_menu is not null && _context is not null)
+                _menu.BeginInvoke(new Action(() => _context.ExitThread()));
+            else
+                _context?.ExitThread();
         }
+        catch { }
         if (_thread.IsAlive) _thread.Join(TimeSpan.FromSeconds(2));
         _ready.Dispose();
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
 }
