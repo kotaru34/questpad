@@ -433,6 +433,42 @@ XrActionStateVector2f getVec2(XrSession s, XrAction a) {
     return st;
 }
 
+struct BatteryReading {
+    bool valid = false;
+    bool charging = false;
+    float level = 0.0f;
+};
+
+BatteryReading getBatteryState(XrSession session, XrPath userPath) {
+    BatteryReading result{};
+    XrBatteryStateDisplayEXT battery{XR_TYPE_BATTERY_STATE_DISPLAY_EXT};
+    XrInteractionProfileState profile{XR_TYPE_INTERACTION_PROFILE_STATE};
+    profile.next = &battery;
+    if (XR_FAILED(xrGetCurrentInteractionProfile(session, userPath, &profile))) return result;
+    if ((battery.stateFlags & XR_BATTERY_STATE_DISPLAY_STATE_VALID_BIT_EXT) == 0) return result;
+    result.valid = true;
+    result.charging = (battery.stateFlags & XR_BATTERY_STATE_DISPLAY_STATE_CHARGING_BIT_EXT) != 0;
+    result.level = std::clamp(battery.batteryLevel, 0.0f, 1.0f);
+    return result;
+}
+
+uint32_t packBatteryState(const BatteryReading& left, const BatteryReading& right) {
+    uint32_t packed = 0;
+    if (left.valid) {
+        const uint32_t pct = static_cast<uint32_t>(std::lround(left.level * 100.0f));
+        packed |= std::min(pct, 100u);
+        packed |= 1u << 16;
+        if (left.charging) packed |= 1u << 18;
+    }
+    if (right.valid) {
+        const uint32_t pct = static_cast<uint32_t>(std::lround(right.level * 100.0f));
+        packed |= std::min(pct, 100u) << 8;
+        packed |= 1u << 17;
+        if (right.charging) packed |= 1u << 19;
+    }
+    return packed;
+}
+
 void setHaptic(XrSession session, XrAction action, uint8_t intensity) {
     XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
     info.action = action;
@@ -574,6 +610,8 @@ void android_main(android_app* app) {
     if (refreshExt) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     const bool touchPlusExt = hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     if (touchPlusExt) extensions.push_back(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
+    const bool batteryExt = hasExtension(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
+    if (batteryExt) extensions.push_back(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
@@ -628,6 +666,12 @@ void android_main(android_app* app) {
         xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance); return;
     }
 
+    XrPath leftUserPath = XR_NULL_PATH;
+    XrPath rightUserPath = XR_NULL_PATH;
+    xrStringToPath(instance, "/user/hand/left", &leftUserPath);
+    xrStringToPath(instance, "/user/hand/right", &rightUserPath);
+    LOGI("controller battery telemetry: %s", batteryExt ? "OpenXR extension available" : "runtime extension unavailable");
+
     BridgeServer bridge;
     bridge.start();
 
@@ -646,6 +690,8 @@ void android_main(android_app* app) {
     uint64_t exitPulseUntilNs = 0;
     int thermal = -1;
     uint64_t nextThermalPoll = 0;
+    uint64_t nextBatteryPoll = 0;
+    uint32_t batteryPacked = 0;
     uint16_t lastRumble = 0;
     uint64_t nextHapticRefresh = 0;
 
@@ -785,6 +831,17 @@ void android_main(android_app* app) {
             if (pressed(actions.lThumb)) packet.buttons |= BTN_LTHUMB;
             if (pressed(actions.rThumb)) packet.buttons |= BTN_RTHUMB;
             if (pressed(actions.view)) packet.buttons |= BTN_VIEW;
+
+            // Battery polling is intentionally slow: battery state is display telemetry,
+            // not latency-sensitive controller input. The ratified OpenXR extension is
+            // optional; runtimes that do not expose it simply leave both validity bits 0.
+            if (batteryExt && packet.monotonicNs >= nextBatteryPoll) {
+                const BatteryReading leftBattery = getBatteryState(session, leftUserPath);
+                const BatteryReading rightBattery = getBatteryState(session, rightUserPath);
+                batteryPacked = packBatteryState(leftBattery, rightBattery);
+                nextBatteryPoll = packet.monotonicNs + 5'000'000'000ULL;
+            }
+            packet.reserved = batteryPacked;
 
             // Exit is expressed in Xbox terms: LS + RS + LB + RB for 3 s.
             // LB/RB are the physical Touch Plus grip squeezes, normalized above with

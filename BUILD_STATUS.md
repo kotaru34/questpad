@@ -11,6 +11,7 @@ QuestPad is functional on real Quest 3 hardware and is currently in early public
 - Windows host successfully creates an Xbox 360-compatible virtual controller through ViGEmBus.
 - A real Windows game recognizes and accepts QuestPad as a game controller rather than keyboard/mouse emulation.
 - Xbox rumble is successfully forwarded back to the Touch Plus controllers.
+- Windows tray status/control UI is implemented; hardware validation of the tray and controller-battery telemetry is pending.
 
 ## Still being validated
 
@@ -18,6 +19,7 @@ QuestPad is functional on real Quest 3 hardware and is currently in early public
 - Broad compatibility across different Windows games.
 - Controller input behavior when headset/controller pose tracking quality degrades.
 - Exit gesture and haptic countdown behavior across Horizon/OpenXR runtime states.
+- Whether the current Quest OpenXR runtime exposes `XR_EXT_interaction_profile_battery_state_display` for Touch Plus, and the granularity/accuracy of the reported percentages.
 - Subjective and instrumented end-to-end input latency.
 
 ## Stability target

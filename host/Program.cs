@@ -19,6 +19,8 @@ internal static class Program
     private const double Deadzone = 0.08;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
+    private static readonly HostStatus Status = new();
+    private static volatile bool EmulationPaused;
 
     private static async Task<int> Main(string[] args)
     {
@@ -26,6 +28,7 @@ internal static class Program
         string? serial = null;
         bool noGamepad = false;
         bool noAdb = false;
+        bool noTray = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -43,6 +46,9 @@ internal static class Program
                 case "--no-adb":
                     noAdb = true;
                     break;
+                case "--no-tray":
+                    noTray = true;
+                    break;
                 case "--help":
                 case "-h":
                     PrintHelp();
@@ -55,6 +61,16 @@ internal static class Program
             e.Cancel = true;
             Cancel.Cancel();
         };
+
+        using TrayStatus? tray = noTray ? null : new TrayStatus(
+            Status,
+            paused =>
+            {
+                EmulationPaused = paused;
+                Status.SetPaused(paused);
+                if (paused) Volatile.Write(ref RumblePacked, 0);
+            },
+            () => Cancel.Cancel());
 
         string? adb = null;
         if (!noAdb)
@@ -92,6 +108,7 @@ internal static class Program
                     Volatile.Write(ref RumblePacked, (e.LargeMotor << 8) | e.SmallMotor);
                 pad.Connect();
                 Neutral(pad);
+                Status.SetGamepadAvailable(true);
                 Console.WriteLine("Virtual Xbox 360 controller: connected");
                 Console.WriteLine("Full-gamepad layer: Menu tap=Start; Menu+RS=D-pad; Menu+R3=Back/View; Menu+LT+RT=Guide.");
                 Console.WriteLine("Rumble bridge: Xbox large/small motors -> left/right Touch Plus haptics.");
@@ -103,6 +120,7 @@ internal static class Program
                 vigem?.Dispose();
                 vigem = null;
                 pad = null;
+                Status.SetGamepadAvailable(false);
             }
         }
 
@@ -133,8 +151,10 @@ internal static class Program
             try
             {
                 using var tcp = new TcpClient { NoDelay = true };
+                Status.SetConnection(false);
                 Console.WriteLine("Waiting for QuestPad on Quest...");
                 await tcp.ConnectAsync("127.0.0.1", Port, ct);
+                Status.SetConnection(true);
                 Console.WriteLine("QuestPad transport connected");
                 mapper.Reset();
 
@@ -179,9 +199,15 @@ internal static class Program
 
                     if (pad is not null)
                     {
+                        if (EmulationPaused)
+                        {
+                            mapper.Reset();
+                            Volatile.Write(ref RumblePacked, 0);
+                            Neutral(pad);
+                        }
                         // FLAG_FOCUSED = bit 1. Quest sends a neutral packet on focus loss,
                         // and the host independently enforces neutral state as a safety net.
-                        if ((p.Flags & 0x2u) == 0)
+                        else if ((p.Flags & 0x2u) == 0)
                         {
                             mapper.Reset();
                             Volatile.Write(ref RumblePacked, 0);
@@ -200,10 +226,13 @@ internal static class Program
                         double hz = windowPackets / printSeconds;
                         lastPrintTicks = now;
                         windowPackets = 0;
+                        var (leftBattery, rightBattery) = DecodeBatteries(p.Reserved);
+                        Status.UpdateTelemetry(hz, dropped, ThermalName(p.Thermal), leftBattery, rightBattery);
+                        string batteryText = $"bat L {BatteryText(leftBattery),4} R {BatteryText(rightBattery),4}";
                         Console.Write(
                             $"\r{hz,5:F1} Hz  seq {p.Sequence,8}  L {p.LX,6:F2},{p.LY,6:F2}  R {p.RX,6:F2},{p.RY,6:F2}  " +
                             $"LT {p.LT:F2} RT {p.RT:F2}  grip {p.LG:F2}/{p.RG:F2}  " +
-                            $"therm {ThermalName(p.Thermal),8}  drops {dropped}      ");
+                            $"{batteryText}  therm {ThermalName(p.Thermal),8}  drops {dropped}      ");
                     }
                 }
             }
@@ -213,6 +242,7 @@ internal static class Program
             }
             catch (Exception ex)
             {
+                Status.SetConnection(false);
                 mapper.Reset();
                 Volatile.Write(ref RumblePacked, 0);
                 if (pad is not null)
@@ -332,6 +362,15 @@ internal static class Program
         4 => "CRITICAL", 5 => "EMERGENCY", 6 => "SHUTDOWN", _ => t.ToString()
     };
 
+    private static (int? left, int? right) DecodeBatteries(uint packed)
+    {
+        int? left = (packed & (1u << 16)) != 0 ? (int)(packed & 0xFFu) : null;
+        int? right = (packed & (1u << 17)) != 0 ? (int)((packed >> 8) & 0xFFu) : null;
+        return (left, right);
+    }
+
+    private static string BatteryText(int? value) => value.HasValue ? $"{value.Value}%" : "n/a";
+
     private static double SecondsSince(long oldTicks, long newTicks) =>
         (newTicks - oldTicks) / (double)Stopwatch.Frequency;
 
@@ -391,16 +430,17 @@ internal static class Program
 
     private static void PrintHelp()
     {
-        Console.WriteLine("QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb]");
+        Console.WriteLine("QuestPad.Host [--adb PATH] [--serial SERIAL] [--no-gamepad] [--no-adb] [--no-tray]");
         Console.WriteLine("  --no-gamepad  transport/input diagnostic only; don't create XInput device");
         Console.WriteLine("  --no-adb      assume tcp:38888 is already reachable (developer testing)");
+        Console.WriteLine("  --no-tray     disable the Windows notification-area status icon");
         Console.WriteLine();
         Console.WriteLine("Full-gamepad layer:");
         Console.WriteLine("  Menu tap                -> Start/Menu");
         Console.WriteLine("  hold Menu + right stick -> D-pad (diagonals supported)");
         Console.WriteLine("  hold Menu + R3          -> Back/View");
         Console.WriteLine("  hold Menu + LT + RT     -> Guide after 0.75 s");
-        Console.WriteLine("  both stick clicks + both grips for 3 s -> exit QuestPad");
+        Console.WriteLine("  LS + RS + LB + RB for 3 s -> exit QuestPad (haptic countdown)");
     }
 
     private readonly record struct Packet(

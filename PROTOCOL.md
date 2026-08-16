@@ -24,7 +24,7 @@ Fixed-size 68-byte little-endian packets, one packet per XR frame (~72 Hz).
 | 52 | f32 | left grip |
 | 56 | f32 | right grip |
 | 60 | u32 | button mask |
-| 64 | u32 | reserved |
+| 64 | u32 | controller battery display telemetry |
 
 Flags:
 
@@ -62,3 +62,16 @@ Each feedback report is a fixed-size 8-byte little-endian packet:
 The Windows host sends a report when motor state changes and at least every 100 ms as a keepalive. The Quest side consumes feedback non-blockingly in the XR frame loop. The large motor drives left Touch Plus haptics and the small motor drives right Touch Plus haptics. Zero feedback, OpenXR focus loss, connection loss, and app exit all stop haptics.
 
 TCP framing is intentionally fixed-size in both directions. A partial write/read is accumulated until a complete packet exists; malformed feedback magic is ignored rather than interpreted as rumble state.
+
+## Controller battery telemetry (offset 64)
+
+The existing 32-bit reserved field is used without changing protocol v1 packet size:
+
+- bits 0..7: left controller battery percentage (0..100)
+- bits 8..15: right controller battery percentage (0..100)
+- bit 16: left percentage valid
+- bit 17: right percentage valid
+- bit 18: left controller charging
+- bit 19: right controller charging
+
+Battery data comes from the optional ratified `XR_EXT_interaction_profile_battery_state_display` extension. If the Quest OpenXR runtime does not expose the extension, validity bits remain clear and hosts must display battery state as unavailable.

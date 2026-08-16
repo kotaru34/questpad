@@ -13,9 +13,10 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
 - ~72 Hz controller sampling on Quest.
 - USB/ADB transport with `TCP_NODELAY`, reconnect, and watchdog safety.
 - No scene rendering and zero submitted composition layers.
-- Low CPU/GPU performance hints and thermal telemetry.
+- Low CPU/GPU performance hints, thermal telemetry, and controller battery display when supported by the runtime.
 - Analog sticks and triggers, face buttons, shoulders, stick clicks, D-pad layer, Start/View/Guide.
 - Xbox rumble bridged back to Touch Plus haptics.
+- Windows notification-area tray with connection, thermal, input-rate and controller-battery status plus pause/exit controls.
 - Focus loss and transport loss force a neutral controller state.
 - Deliberate `LS + RS + LB + RB` 3-second exit gesture with haptic countdown cues.
 
@@ -59,7 +60,7 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
 
 5. Windows should now expose a virtual Xbox 360 controller. `joy.cpl` is a convenient way to verify it before launching a game.
 
-The host automatically creates the ADB forward to `tcp:38888` and reconnects after temporary transport loss.
+The host automatically creates the ADB forward to `tcp:38888` and reconnects after temporary transport loss. A tray icon is enabled by default; use `--no-tray` for console-only operation.
 
 ## Default controls
 
@@ -170,7 +171,7 @@ QuestPad is an early public project. Real Quest 3 testing has confirmed:
 - successful control of a real Windows game through XInput;
 - working game rumble on Touch Plus controllers.
 
-Longer thermal/transport soak testing and broader game compatibility testing are still in progress. See [BUILD_STATUS.md](BUILD_STATUS.md).
+Controller battery display uses the optional ratified OpenXR battery-state extension and therefore appears as `n/a` if the installed Quest runtime does not expose it. Longer thermal/transport soak testing and broader game compatibility testing are still in progress. See [BUILD_STATUS.md](BUILD_STATUS.md).
 
 ## Protocol
 
