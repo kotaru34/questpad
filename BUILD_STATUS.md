@@ -1,30 +1,25 @@
 # QuestPad v0.1 build/validation status
 
-## Verified in this workspace
+## Verified
 
 - Wire packet layout is fixed at 68 bytes and documented in `PROTOCOL.md`.
 - Go transport diagnostic cross-compiles to Windows x64.
 - The Windows diagnostic was exercised against a 72 Hz mock Quest TCP stream and correctly decoded sequence numbers, flags, sticks, triggers, grips, buttons, thermal status and packet cadence.
 - Android manifest / Gradle / CMake project structure is aligned with Meta's NativeActivity OpenXR sample layout.
 - ViGEm managed API calls used by `QuestPad.Host` were checked against the upstream `Nefarius.ViGEm.Client` interfaces: batched report mode, reset, axis/slider/button setters and explicit submit.
+- GitHub Actions successfully compiled both `quest-debug.apk` and the self-contained `QuestPad.Host.exe` for win-x64.
+- **Real Quest 3 transport/input test passed on 2026-08-16:** the Quest app connected through the ADB TCP forward, sustained ~71.9 Hz, reported `thermal=NONE`, and the host reported `drops=0` during the observed sample.
+- The reconnect path was exercised: after the Quest closed one transport connection, the host watchdog detected it, returned to waiting state, and reconnected successfully when the Quest endpoint returned.
 
-## Requires CI build
+## Still requires real hardware validation
 
-This execution environment does not contain an Android SDK/NDK or .NET SDK, so these two binaries are deliberately **not** represented as locally compiled/tested:
-
-- `quest-debug.apk`
-- `QuestPad.Host.exe`
-
-`.github/workflows/build.yml` builds both without Visual Studio or Android Studio on the user's PC.
-
-## Requires real Quest 3 hardware test
-
-- Touch Plus interaction profile/bindings on the installed Horizon OS version.
-- Whether normal button input remains active when controller pose quality degrades while the headset rests on a desk.
-- Long-run thermal state and actual headset temperature with zero composition layers, 72 Hz and sustained-low performance hints.
-- Whether the Android brightness request affects the physical panel under the Meta OpenXR runtime.
-- End-to-end controller latency in a real game.
-- ViGEm/XInput compatibility on the target Windows installation.
+- Verify all intended Touch Plus controls under active use: both analog sticks, analog triggers, grips, A/B/X/Y, stick clicks, and Menu.
+- Verify normal button input remains active when controller pose quality degrades while the headset rests on a desk.
+- Run >= 60 minutes and record thermal state / subjective headset temperature with zero composition layers, 72 Hz and sustained-low performance hints.
+- Verify whether the Android brightness request materially affects the physical panel under the Meta OpenXR runtime.
+- Verify ViGEm/XInput compatibility on the target Windows installation and confirm games identify QuestPad as an Xbox 360-style controller rather than keyboard/mouse input.
+- Measure subjective and, if useful, instrumented end-to-end controller latency in a real game.
+- Confirm focus-loss neutralization and the deliberate 3-second exit chord on hardware.
 
 ## Acceptance target before calling it stable
 
