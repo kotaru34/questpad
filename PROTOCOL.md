@@ -1,6 +1,10 @@
 # QuestPad wire protocol v1
 
-TCP, fixed-size 68-byte little-endian packets, one packet per XR frame.
+One full-duplex TCP connection is carried over the ADB forward on port 38888.
+
+## Quest -> Windows input stream
+
+Fixed-size 68-byte little-endian packets, one packet per XR frame (~72 Hz).
 
 | Offset | Type | Field |
 |---:|---|---|
@@ -38,4 +42,23 @@ Buttons:
 - bit 3 Y
 - bit 4 left thumb click
 - bit 5 right thumb click
-- bit 6 View / left Menu
+- bit 6 raw left Menu input
+
+The Windows mapping layer converts that raw control state into the complete Xbox 360 surface documented in `MAPPING.md`.
+
+## Windows -> Quest feedback stream
+
+Xbox rumble uses the reverse direction of the **same TCP connection**. There is no second socket or ADB forward.
+
+Each feedback report is a fixed-size 8-byte little-endian packet:
+
+| Offset | Type | Field |
+|---:|---|---|
+| 0 | u32 | magic `0x31424651` (`QFB1`) |
+| 4 | u8 | Xbox large-motor amplitude, 0..255 |
+| 5 | u8 | Xbox small-motor amplitude, 0..255 |
+| 6 | u16 | reserved = 0 |
+
+The Windows host sends a report when motor state changes and at least every 100 ms as a keepalive. The Quest side consumes feedback non-blockingly in the XR frame loop. The large motor drives left Touch Plus haptics and the small motor drives right Touch Plus haptics. Zero feedback, OpenXR focus loss, connection loss, and app exit all stop haptics.
+
+TCP framing is intentionally fixed-size in both directions. A partial write/read is accumulated until a complete packet exists; malformed feedback magic is ignored rather than interpreted as rumble state.
