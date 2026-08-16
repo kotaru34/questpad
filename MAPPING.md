@@ -1,87 +1,110 @@
 # QuestPad controller mapping
 
-QuestPad exposes a complete Xbox 360/XInput control surface while keeping normal Touch Plus controls direct and synthetic controls ergonomic.
+QuestPad maps Touch Plus into a backend-independent logical gamepad state. That logical state can currently be emitted as Xbox 360/XInput or DualShock 4; steering mode can replace only the logical Left Stick X value while preserving every other control.
 
 ## Direct controls
 
-| Touch Plus | Virtual Xbox 360 |
-|---|---|
-| Left thumbstick | Left Stick |
-| Right thumbstick | Right Stick |
-| Left trigger | LT (analog) |
-| Right trigger | RT (analog) |
-| Left grip squeeze | LB |
-| Right grip squeeze | RB |
-| A / B / X / Y | A / B / X / Y |
-| Left stick click | LS / L3 |
-| Right stick click | RS / R3 |
+| Touch Plus | Logical / Xbox | DualShock 4 |
+|---|---|---|
+| Left thumbstick | Left Stick | Left Stick |
+| Right thumbstick | Right Stick | Right Stick |
+| Left trigger | LT analog | L2 analog |
+| Right trigger | RT analog | R2 analog |
+| Left grip squeeze | LB | L1 |
+| Right grip squeeze | RB | R1 |
+| A | A | Cross |
+| B | B | Circle |
+| X | X | Square |
+| Y | Y | Triangle |
+| Left stick click | LS / L3 | L3 |
+| Right stick click | RS / R3 | R3 |
 
-Grip-to-shoulder conversion uses hysteresis: press at 0.62, release below 0.45. This avoids button chatter without requiring an unnecessarily hard squeeze.
+Grip-to-shoulder conversion uses hysteresis: press at 0.62, release below 0.45.
 
 ## Menu modifier layer
 
-The physical **left Menu** button acts as both the Xbox Start/Menu control and a modifier because it is available to applications. The Meta/System button remains owned by Horizon OS.
+The physical **left Menu** button is available to applications and acts as Start/Menu plus a modifier. The Meta/System button remains Horizon-owned.
 
-| Gesture | Virtual Xbox 360 |
-|---|---|
-| Tap and release Menu | Start / Menu tap |
-| Hold Menu by itself for 0.50 s | Start / Menu held continuously until release |
-| Hold Menu + right stick ↑ | D-pad Up |
-| Hold Menu + right stick ↓ | D-pad Down |
-| Hold Menu + right stick ← | D-pad Left |
-| Hold Menu + right stick → | D-pad Right |
-| Hold Menu + right stick diagonally | matching D-pad diagonal |
-| Menu + R3 | Back / View; stays held while R3 remains physically held |
-| Hold Menu + LT + RT for 0.75 s | Guide |
+| Gesture | Xbox 360 | DualShock 4 |
+|---|---|---|
+| Tap and release Menu | Start / Menu tap | Options tap |
+| Hold Menu by itself for 0.50 s | Start / Menu held | Options held |
+| Hold Menu + right stick | D-pad, including diagonals | D-pad, including diagonals |
+| Menu + R3 | Back / View held while R3 remains held | Share held while R3 remains held |
+| Hold Menu + LT + RT for 0.75 s | Guide | PS |
 
-### Why this layout
+Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 becomes a genuine held View/Share state rather than a short pulse.
 
-- Menu is on the left controller, leaving the right thumb free for the D-pad layer.
-- A quick Menu press still behaves like an ordinary Start/Menu tap.
-- A plain Menu hold commits to a real continuous Start/Menu hold after 0.50 s, which is required by games that distinguish press from hold.
-- Modifier actions must begin before the plain Menu hold commits. Once the hold has committed, it stays Start/Menu until release instead of changing mode unexpectedly.
-- Right-stick camera output is suppressed while Menu is held for D-pad use.
-- Menu + R3 is a cross-hand chord and does not require one thumb to press two controls at once. Once activated, Back/View remains down until R3 is released, so games can detect a genuine long press and the user may release Menu after starting the chord.
-- Guide is intentionally deliberate because it is rarely needed during moment-to-moment gameplay.
-- D-pad directions use hysteresis to avoid chatter around direction boundaries.
+## Native gyro
+
+Native gyro is available only on the DS4 backend because XInput has no motion fields.
+
+The physical source is always the **right Touch Plus controller**. Two experimental acquisition paths are selectable:
+
+- **Camera-assisted tracked pose**: requires optical `POSITION_TRACKED=1` and derives controller-local angular rate from successive tracked orientation samples.
+- **Angular-rate only**: consumes the OpenXR angular-velocity stream and does not consume absolute controller pose on Windows.
+
+The second mode must not be described as raw MEMS access: Horizon/OpenXR can still perform internal fusion. The purpose of the switch is to compare application-visible optical-pose dependence, accuracy, jitter and thermal behaviour.
+
+Optional Windows-side adaptive smoothing is Off/Light/Medium/Strong. Off is the default because game-native motion filtering should be preferred when it is good enough.
+
+## Steering-wheel mapping
+
+Steering mode consumes both Touch Plus controllers and writes one logical field:
+
+```text
+estimated wheel angle -> Left Stick X
+```
+
+Everything else remains active: triggers, grips/shoulders, A/B/X/Y, right stick, stick clicks, Menu modifier controls and haptics.
+
+### Calibration
+
+With the wheel physically centered, choose **Calibrate steering center**. QuestPad records the relative controller orientations and then asks the user to turn left/right briefly so the estimator can learn the actual physical rotation axis instead of assuming a particular mounting angle.
+
+### Mounted / rigid
+
+For controllers fixed to a ring, plate, cardboard wheel or similar fixture. Both orientations are treated as redundant observations of one rigid body. The estimator checks whether the controllers preserve their calibrated relative orientation and rejects implausible sudden disagreement/tracking spikes.
+
+Position data is not required for mounted steering.
+
+### Free-air optical
+
+Uses the line joining the two tracked controller XYZ positions as an imaginary wheel. It is valid only when **both controllers have `POSITION_TRACKED=1`**.
+
+### Hybrid
+
+Uses free-air optical geometry while both positions are tracked and falls back to orientation-based mounted steering when optical position disappears.
+
+### Position validity rule
+
+`POSITION_VALID` by itself is not sufficient. A runtime can retain a valid-but-not-currently-tracked position after optical loss. QuestPad therefore consumes controller XYZ **only while `POSITION_TRACKED=1`**; PT=0 position values are ignored completely.
+
+### Dropouts
+
+A short tracking dropout preserves the last reliable steering value instead of centering the car. If the estimator cannot recover within the short hold window, QuestPad falls back to the physical left stick.
+
+The current wheel backend is intentionally a gamepad steering axis, not a native HID wheel. The estimator outputs a backend-independent logical steering value so a future HID wheel driver can reuse it without redesigning the tracking/fusion layer.
 
 ## Exiting QuestPad
 
-Hold **LS + RS + LB + RB** for **3 seconds**.
-
-Here `LB/RB` mean the physical **left/right grip squeezes**. The exit detector uses the same comfortable logical shoulder thresholds as normal gameplay rather than requiring a >75% squeeze.
+Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` here are the grip squeezes.
 
 While the exit gesture is armed:
 
 - LS, RS, LB and RB are suppressed from the virtual controller;
 - both Touch Plus controllers pulse after 1 second;
-- a stronger pulse is sent after 2 seconds;
-- a final confirmation pulse is sent at 3 seconds;
-- the virtual gamepad is neutralized before the OpenXR session is asked to exit.
+- another cue occurs after 2 seconds;
+- a stronger final confirmation occurs at 3 seconds;
+- the virtual gamepad is neutralized before OpenXR exit is requested.
 
-Releasing any part of the gesture before 3 seconds cancels the exit sequence.
-
-## Touch Plus inputs intentionally left unused
-
-Touch Plus exposes additional capacitive/touch-style signals that do not have direct equivalents on a standard Xbox 360 controller. Mapping normal finger-rest states to gameplay buttons would increase accidental input, so these signals are reserved for future optional profiles rather than enabled by default.
-
-## Motion data
-
-Touch Plus also exposes tracked controller poses through OpenXR (`grip/pose` and `aim/pose`). OpenXR can return orientation, position, linear velocity and angular velocity for those tracked spaces. QuestPad does not currently forward motion data because the Xbox 360/XInput report has no gyroscope or accelerometer fields.
-
-A future motion profile can therefore use one of three strategies without changing the basic controller transport:
-
-- right Touch Plus motion as the default aiming gyro source;
-- left Touch Plus motion as an alternative source;
-- a synthesized two-hand virtual-gamepad frame derived from both controller poses for users who hold the controllers like two halves of one gamepad.
-
-The first option is expected to be the most stable and ergonomic default. A synthesized two-hand frame is possible but inherently less deterministic because the two Touch Plus controllers are independent physical objects rather than one rigid controller shell.
+Releasing any part before 3 seconds cancels the sequence.
 
 ## Haptics
 
-Xbox 360 rumble is bridged back to Touch Plus through OpenXR haptics:
+Virtual-controller rumble is bridged back to Touch Plus:
 
-- large motor → left controller
-- small motor → right controller
+- large motor -> left controller
+- small motor -> right controller
 
-Exit countdown cues temporarily take priority over game rumble. Rumble is cleared on focus loss, disconnect, and application exit.
+Exit countdown cues temporarily take priority. Rumble clears on pause, focus loss, disconnect and application exit.
