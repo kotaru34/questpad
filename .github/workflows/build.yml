@@ -1,0 +1,39 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  quest-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: yes | sdkmanager --licenses >/dev/null
+      - run: sdkmanager "platforms;android-32" "build-tools;32.0.0" "cmake;3.22.1" "ndk;27.0.12077973"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+      - run: gradle :quest:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-APK
+          path: quest/build/outputs/apk/debug/quest-debug.apk
+
+  windows-host:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-Host-win-x64
+          path: host/bin/Release/net8.0/win-x64/publish/QuestPad.Host.exe
