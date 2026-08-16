@@ -16,6 +16,7 @@ QuestPad is designed for situations where the Touch Plus form factor is useful o
 - Low CPU/GPU performance hints and thermal telemetry.
 - Controller battery display with OpenXR first and a best-effort ADB fallback for Horizon runtimes that do not expose OpenXR battery data yet.
 - Analog sticks and triggers, face buttons, shoulders, stick clicks, D-pad layer, Start/View/Guide.
+- Genuine held Start/Menu and Back/View semantics for games that distinguish tap from hold.
 - Xbox rumble bridged back to Touch Plus haptics.
 - Tray-first Windows UI with connection, gamepad, thermal, input-rate, drop-count and controller-battery status plus pause/exit controls.
 - Separate console build for command-line flags, diagnostics and logs.
@@ -79,12 +80,15 @@ The host automatically creates the ADB forward to `tcp:38888` and reconnects aft
 | A / B | A / B |
 | Left stick click | LS / L3 |
 | Right stick click | RS / R3 |
-| Tap left Menu | Start / Menu |
+| Tap left Menu | Start / Menu tap |
+| Hold left Menu by itself for 0.50 s | Start / Menu held until release |
 | Hold Menu + right stick | D-pad (8 directions) |
-| Menu + R3 | Back / View |
+| Menu + R3 | Back / View; held while R3 remains held |
 | Menu + LT + RT for 0.75 s | Guide |
 
 The Meta/System button is intentionally left to Horizon OS.
+
+For modifier gestures, begin the modifier action before the 0.50-second plain-Menu hold commits. Once a plain hold has committed to Start/Menu, it remains Start/Menu until release instead of changing modes unexpectedly.
 
 ### Exit QuestPad
 
@@ -111,6 +115,12 @@ The tray shows both controller percentages and the active source (`OpenXR`, `ADB
 
 The ADB-side service is a Horizon implementation detail rather than a public API. If Meta changes or removes it in a future OS release, controller battery display may return to `n/a`; the gamepad bridge itself is unaffected.
 
+## Motion / gyro potential
+
+Touch Plus has tracked 6DoF controller poses. OpenXR exposes controller `grip/pose` and `aim/pose`, and tracked spaces can provide orientation, position, linear velocity and angular velocity. QuestPad does not currently forward motion data because the Xbox 360/XInput report itself has no gyro or accelerometer fields.
+
+A future motion profile can use the right Touch Plus controller as the default gyro/aim source, use the left controller instead, or synthesize a two-hand virtual-gamepad frame from both tracked poses. The right-hand source is the simplest and most stable default; combining two independent controllers into one virtual rigid-body orientation is possible but necessarily more heuristic.
+
 ## Thermal / display design
 
 QuestPad is intentionally not a VR renderer. The Quest application:
@@ -118,7 +128,7 @@ QuestPad is intentionally not a VR renderer. The Quest application:
 - requests the supported refresh rate nearest 72 Hz;
 - submits **zero OpenXR composition layers**;
 - does not create eye swapchains or render a scene;
-- does not query controller poses for the gamepad bridge;
+- currently does not query controller poses for the gamepad bridge;
 - requests sustained-low CPU/GPU performance levels when supported;
 - asks Android for minimum window brightness on a best-effort basis;
 - reports Android thermal status to the Windows host.
@@ -215,7 +225,8 @@ QuestPad is an early public project. Real Quest 3 testing has confirmed:
 - `thermal=NONE` during the initial observed run;
 - successful virtual Xbox 360 creation;
 - successful control of a real Windows game through XInput;
-- working game rumble on Touch Plus controllers.
+- working game rumble on Touch Plus controllers;
+- controller battery telemetry through the ADB fallback when OpenXR battery state is unavailable.
 
 Longer thermal/transport soak testing and broader game compatibility testing are still in progress. See [BUILD_STATUS.md](BUILD_STATUS.md).
 
