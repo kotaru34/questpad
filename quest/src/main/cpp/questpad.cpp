@@ -14,7 +14,6 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -34,9 +33,9 @@
 namespace {
 constexpr const char* kTag = "QuestPad";
 constexpr uint16_t kPort = 38888;
-constexpr uint32_t kMagic = 0x44415051u; // "QPAD" little-endian
-constexpr uint32_t kFeedbackMagic = 0x31424651u; // "QFB1" little-endian
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint32_t kMagic = 0x44415051u; // QPAD little-endian
+constexpr uint32_t kFeedbackMagic = 0x31424651u; // QFB1 little-endian
+constexpr uint16_t kProtocolVersion = 2;
 constexpr uint64_t kExitHoldNs = 3'000'000'000ULL;
 constexpr uint64_t kExitPulseNs = 125'000'000ULL;
 constexpr float kShoulderPressThreshold = 0.62f;
@@ -69,15 +68,23 @@ struct __attribute__((packed)) PadPacket {
     float lg;
     float rg;
     uint32_t buttons;
-    uint32_t reserved;
+    uint32_t reserved; // battery telemetry, unchanged from protocol v1
+
+    uint32_t motionFlags;
+    XrQuaternionf leftOrientation;
+    XrQuaternionf rightOrientation;
+    XrVector3f leftPosition;
+    XrVector3f rightPosition;
+    XrVector3f leftAngularLocal;
+    XrVector3f rightAngularLocal;
 };
-static_assert(sizeof(PadPacket) == 68, "PadPacket wire size changed");
+static_assert(sizeof(PadPacket) == 152, "PadPacket protocol v2 wire size changed");
 
 struct __attribute__((packed)) RumblePacket {
     uint32_t magic;
     uint8_t largeMotor;
     uint8_t smallMotor;
-    uint16_t reserved;
+    uint16_t control; // host -> Quest motion acquisition mode
 };
 static_assert(sizeof(RumblePacket) == 8, "RumblePacket wire size changed");
 
@@ -96,93 +103,119 @@ enum Buttons : uint32_t {
     BTN_Y = 1u << 3,
     BTN_LTHUMB = 1u << 4,
     BTN_RTHUMB = 1u << 5,
-    BTN_VIEW = 1u << 6, // left Menu button
+    BTN_VIEW = 1u << 6,
+};
+
+enum MotionFlags : uint32_t {
+    MOTION_LEFT_ACTIVE = 1u << 0,
+    MOTION_LEFT_OV = 1u << 1,
+    MOTION_LEFT_OT = 1u << 2,
+    MOTION_LEFT_PV = 1u << 3,
+    MOTION_LEFT_PT = 1u << 4,
+    MOTION_LEFT_AV = 1u << 5,
+    MOTION_RIGHT_ACTIVE = 1u << 8,
+    MOTION_RIGHT_OV = 1u << 9,
+    MOTION_RIGHT_OT = 1u << 10,
+    MOTION_RIGHT_PV = 1u << 11,
+    MOTION_RIGHT_PT = 1u << 12,
+    MOTION_RIGHT_AV = 1u << 13,
+    MOTION_QUERIED = 1u << 16,
+};
+
+enum MotionRequest : uint16_t {
+    MOTION_REQUEST_NONE = 0,
+    MOTION_REQUEST_RIGHT_ANGULAR = 1,
+    MOTION_REQUEST_RIGHT_TRACKED = 2,
+    MOTION_REQUEST_BOTH_TRACKED = 3,
+};
+
+struct FeedbackState {
+    uint8_t large = 0;
+    uint8_t small = 0;
+    uint16_t control = 0;
 };
 
 class BridgeServer {
 public:
     ~BridgeServer() { stop(); }
 
-    bool start() {
-        if (running_.exchange(true)) return true;
+    void start() {
+        if (running_.exchange(true)) return;
         thread_ = std::thread([this] { run(); });
-        return true;
     }
 
     void stop() {
         if (!running_.exchange(false)) return;
-        const int listen = listenFd_.exchange(-1);
+        int listen = listenFd_.exchange(-1);
         if (listen >= 0) close(listen);
-        const int client = clientFd_.exchange(-1);
+        int client = clientFd_.exchange(-1);
         if (client >= 0) close(client);
         if (thread_.joinable()) thread_.join();
     }
 
-    uint16_t pollRumble() {
+    FeedbackState pollFeedback() {
         int fd = clientFd_.load(std::memory_order_relaxed);
-        // accept() runs on a separate thread. Keep the framing buffer entirely
-        // owned by this XR thread and reset it when the published client fd changes.
         if (fd != feedbackFd_) {
             feedbackFd_ = fd;
             feedbackBytes_ = 0;
-            rumblePacked_.store(0, std::memory_order_relaxed);
+            feedbackWord_.store(0, std::memory_order_relaxed);
         }
-        if (fd < 0) {
-            rumblePacked_.store(0, std::memory_order_relaxed);
-            feedbackBytes_ = 0;
-            return 0;
-        }
+        if (fd < 0) return {};
 
         for (;;) {
-            const ssize_t n = ::recv(
-                fd, feedbackBuf_ + feedbackBytes_, sizeof(feedbackBuf_) - feedbackBytes_, MSG_DONTWAIT);
+            ssize_t n = ::recv(fd, feedbackBuf_ + feedbackBytes_, sizeof(feedbackBuf_) - feedbackBytes_, MSG_DONTWAIT);
             if (n > 0) {
                 feedbackBytes_ += static_cast<size_t>(n);
                 if (feedbackBytes_ == sizeof(feedbackBuf_)) {
-                    RumblePacket feedback{};
-                    std::memcpy(&feedback, feedbackBuf_, sizeof(feedback));
+                    RumblePacket p{};
+                    std::memcpy(&p, feedbackBuf_, sizeof(p));
                     feedbackBytes_ = 0;
-                    if (feedback.magic == kFeedbackMagic) {
-                        const uint16_t packed =
-                            (static_cast<uint16_t>(feedback.largeMotor) << 8) | feedback.smallMotor;
-                        rumblePacked_.store(packed, std::memory_order_relaxed);
+                    if (p.magic == kFeedbackMagic) {
+                        uint32_t word = static_cast<uint32_t>(p.largeMotor) |
+                            (static_cast<uint32_t>(p.smallMotor) << 8) |
+                            (static_cast<uint32_t>(p.control) << 16);
+                        feedbackWord_.store(word, std::memory_order_relaxed);
                     } else {
-                        LOGW("invalid rumble packet magic: 0x%08x", feedback.magic);
+                        LOGW("invalid feedback magic: 0x%08x", p.magic);
                     }
                 }
                 continue;
             }
             if (n == 0) {
                 dropClient(fd);
-                return 0;
+                return {};
             }
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                return rumblePacked_.load(std::memory_order_relaxed);
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             if (errno == EINTR) continue;
             dropClient(fd);
-            return 0;
+            return {};
         }
+
+        uint32_t word = feedbackWord_.load(std::memory_order_relaxed);
+        return {
+            static_cast<uint8_t>(word & 0xff),
+            static_cast<uint8_t>((word >> 8) & 0xff),
+            static_cast<uint16_t>((word >> 16) & 0xffff)
+        };
     }
 
     void sendPacket(const PadPacket& packet) {
         int fd = clientFd_.load(std::memory_order_relaxed);
         if (fd < 0) return;
-        const auto* p = reinterpret_cast<const uint8_t*>(&packet);
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&packet);
         size_t left = sizeof(packet);
         while (left > 0) {
-            const ssize_t n = ::send(fd, p, left, MSG_NOSIGNAL | MSG_DONTWAIT);
+            ssize_t n = ::send(fd, p, left, MSG_NOSIGNAL | MSG_DONTWAIT);
             if (n > 0) {
                 p += n;
                 left -= static_cast<size_t>(n);
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                // Dropping a whole stale sample is safe, but a partial TCP write would
-                // destroy packet framing. If any bytes were already sent, reconnect.
-                if (left == sizeof(packet)) return;
-                dropClient(fd);
+                if (left != sizeof(packet)) dropClient(fd);
                 return;
             }
+            if (n < 0 && errno == EINTR) continue;
             dropClient(fd);
             return;
         }
@@ -193,7 +226,7 @@ private:
         int expected = fd;
         if (clientFd_.compare_exchange_strong(expected, -1)) {
             close(fd);
-            rumblePacked_.store(0, std::memory_order_relaxed);
+            feedbackWord_.store(0, std::memory_order_relaxed);
             feedbackBytes_ = 0;
             LOGW("host disconnected");
         }
@@ -214,15 +247,8 @@ private:
         addr.sin_family = AF_INET;
         addr.sin_port = htons(kPort);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            LOGE("bind(127.0.0.1:%u) failed: %d", kPort, errno);
-            close(s);
-            listenFd_ = -1;
-            running_ = false;
-            return;
-        }
-        if (listen(s, 1) < 0) {
-            LOGE("listen() failed: %d", errno);
+        if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0 || listen(s, 1) < 0) {
+            LOGE("bind/listen failed: %d", errno);
             close(s);
             listenFd_ = -1;
             running_ = false;
@@ -232,18 +258,18 @@ private:
 
         while (running_.load()) {
             sockaddr_in peer{};
-            socklen_t peerLen = sizeof(peer);
-            int c = accept(s, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+            socklen_t len = sizeof(peer);
+            int c = accept(s, reinterpret_cast<sockaddr*>(&peer), &len);
             if (c < 0) {
                 if (!running_.load()) break;
                 if (errno == EINTR) continue;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            const int old = clientFd_.exchange(c);
+            int old = clientFd_.exchange(c);
             if (old >= 0) close(old);
-            rumblePacked_.store(0, std::memory_order_relaxed);
-            int snd = 4096;
+            feedbackWord_.store(0, std::memory_order_relaxed);
+            int snd = 8192;
             setsockopt(c, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
             int noDelay = 1;
             setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
@@ -254,10 +280,10 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> listenFd_{-1};
     std::atomic<int> clientFd_{-1};
-    std::atomic<uint16_t> rumblePacked_{0};
+    std::atomic<uint32_t> feedbackWord_{0};
     uint8_t feedbackBuf_[sizeof(RumblePacket)]{};
     size_t feedbackBytes_ = 0;
-    int feedbackFd_ = -1; // XR-thread-owned connection generation marker
+    int feedbackFd_ = -1;
     std::thread thread_;
 };
 
@@ -273,24 +299,18 @@ bool createEgl(EglState& e) {
     if (e.display == EGL_NO_DISPLAY) return false;
     EGLint major = 0, minor = 0;
     if (!eglInitialize(e.display, &major, &minor)) return false;
-
-    const EGLint cfgAttrs[] = {
+    const EGLint cfg[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
         EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 8,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_NONE};
-    EGLint n = 0;
-    if (!eglChooseConfig(e.display, cfgAttrs, &e.config, 1, &n) || n < 1) return false;
-
-    const EGLint ctxAttrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    e.context = eglCreateContext(e.display, e.config, EGL_NO_CONTEXT, ctxAttrs);
+    EGLint count = 0;
+    if (!eglChooseConfig(e.display, cfg, &e.config, 1, &count) || count < 1) return false;
+    const EGLint ctx[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    e.context = eglCreateContext(e.display, e.config, EGL_NO_CONTEXT, ctx);
     if (e.context == EGL_NO_CONTEXT) return false;
-
-    const EGLint surfAttrs[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
-    e.surface = eglCreatePbufferSurface(e.display, e.config, surfAttrs);
+    const EGLint surf[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
+    e.surface = eglCreatePbufferSurface(e.display, e.config, surf);
     if (e.surface == EGL_NO_SURFACE) return false;
     if (!eglMakeCurrent(e.display, e.surface, e.surface, e.context)) return false;
     LOGI("EGL %d.%d ready", major, minor);
@@ -307,31 +327,28 @@ void destroyEgl(EglState& e) {
     e = {};
 }
 
-struct Actions {
-    XrActionSet set = XR_NULL_HANDLE;
-    XrAction lStick = XR_NULL_HANDLE;
-    XrAction rStick = XR_NULL_HANDLE;
-    XrAction lTrigger = XR_NULL_HANDLE;
-    XrAction rTrigger = XR_NULL_HANDLE;
-    XrAction lGrip = XR_NULL_HANDLE;
-    XrAction rGrip = XR_NULL_HANDLE;
-    XrAction a = XR_NULL_HANDLE;
-    XrAction b = XR_NULL_HANDLE;
-    XrAction x = XR_NULL_HANDLE;
-    XrAction y = XR_NULL_HANDLE;
-    XrAction lThumb = XR_NULL_HANDLE;
-    XrAction rThumb = XR_NULL_HANDLE;
-    XrAction view = XR_NULL_HANDLE;
-    XrAction lHaptic = XR_NULL_HANDLE;
-    XrAction rHaptic = XR_NULL_HANDLE;
-};
-
-bool xrOk(XrInstance inst, XrResult r, const char* what) {
-    if (XR_SUCCEEDED(r)) return true;
-    char s[XR_MAX_RESULT_STRING_SIZE] = {};
-    if (inst != XR_NULL_HANDLE) xrResultToString(inst, r, s);
-    LOGE("%s failed: %d %s", what, r, s);
+bool xrOk(XrInstance instance, XrResult result, const char* what) {
+    if (XR_SUCCEEDED(result)) return true;
+    char text[XR_MAX_RESULT_STRING_SIZE]{};
+    if (instance != XR_NULL_HANDLE) xrResultToString(instance, result, text);
+    LOGE("%s failed: %d %s", what, result, text);
     return false;
+}
+
+bool hasExtension(const char* name) {
+    uint32_t count = 0;
+    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr))) return false;
+    std::vector<XrExtensionProperties> props(count);
+    for (auto& p : props) { p.type = XR_TYPE_EXTENSION_PROPERTIES; p.next = nullptr; }
+    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data()))) return false;
+    for (const auto& p : props) if (std::strcmp(p.extensionName, name) == 0) return true;
+    return false;
+}
+
+XrPosef identityPose() {
+    XrPosef p{};
+    p.orientation.w = 1.0f;
+    return p;
 }
 
 XrAction makeAction(XrActionSet set, XrActionType type, const char* name, const char* pretty) {
@@ -344,11 +361,21 @@ XrAction makeAction(XrActionSet set, XrActionType type, const char* name, const 
     return action;
 }
 
+struct Actions {
+    XrActionSet set = XR_NULL_HANDLE;
+    XrAction lStick = XR_NULL_HANDLE, rStick = XR_NULL_HANDLE;
+    XrAction lTrigger = XR_NULL_HANDLE, rTrigger = XR_NULL_HANDLE;
+    XrAction lGrip = XR_NULL_HANDLE, rGrip = XR_NULL_HANDLE;
+    XrAction a = XR_NULL_HANDLE, b = XR_NULL_HANDLE, x = XR_NULL_HANDLE, y = XR_NULL_HANDLE;
+    XrAction lThumb = XR_NULL_HANDLE, rThumb = XR_NULL_HANDLE, view = XR_NULL_HANDLE;
+    XrAction lHaptic = XR_NULL_HANDLE, rHaptic = XR_NULL_HANDLE;
+    XrAction lPose = XR_NULL_HANDLE, rPose = XR_NULL_HANDLE;
+};
+
 bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlusExt) {
     XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
     std::strncpy(setInfo.actionSetName, "gamepad", XR_MAX_ACTION_SET_NAME_SIZE - 1);
     std::strncpy(setInfo.localizedActionSetName, "QuestPad Gamepad", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
-    setInfo.priority = 0;
     if (!xrOk(inst, xrCreateActionSet(inst, &setInfo, &a.set), "xrCreateActionSet")) return false;
 
     a.lStick = makeAction(a.set, XR_ACTION_TYPE_VECTOR2F_INPUT, "left_stick", "Left stick");
@@ -366,6 +393,8 @@ bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlus
     a.view = makeAction(a.set, XR_ACTION_TYPE_BOOLEAN_INPUT, "view", "View");
     a.lHaptic = makeAction(a.set, XR_ACTION_TYPE_VIBRATION_OUTPUT, "left_haptic", "Left haptic");
     a.rHaptic = makeAction(a.set, XR_ACTION_TYPE_VIBRATION_OUTPUT, "right_haptic", "Right haptic");
+    a.lPose = makeAction(a.set, XR_ACTION_TYPE_POSE_INPUT, "left_grip_pose", "Left grip pose");
+    a.rPose = makeAction(a.set, XR_ACTION_TYPE_POSE_INPUT, "right_grip_pose", "Right grip pose");
 
     std::vector<XrActionSuggestedBinding> bindings;
     auto bind = [&](XrAction action, const char* pathText) {
@@ -387,26 +416,22 @@ bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlus
     bind(a.view, "/user/hand/left/input/menu/click");
     bind(a.lHaptic, "/user/hand/left/output/haptic");
     bind(a.rHaptic, "/user/hand/right/output/haptic");
+    bind(a.lPose, "/user/hand/left/input/grip/pose");
+    bind(a.rPose, "/user/hand/right/input/grip/pose");
 
-    auto suggestProfile = [&](const char* profileText) {
+    auto suggest = [&](const char* profileText) {
         XrPath profile = XR_NULL_PATH;
         if (XR_FAILED(xrStringToPath(inst, profileText, &profile))) return false;
-        XrInteractionProfileSuggestedBinding suggestion{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        suggestion.interactionProfile = profile;
-        suggestion.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
-        suggestion.suggestedBindings = bindings.data();
-        return XR_SUCCEEDED(xrSuggestInteractionProfileBindings(inst, &suggestion));
+        XrInteractionProfileSuggestedBinding s{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        s.interactionProfile = profile;
+        s.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+        s.suggestedBindings = bindings.data();
+        return XR_SUCCEEDED(xrSuggestInteractionProfileBindings(inst, &s));
     };
 
-    // Keep the core Oculus Touch profile as a compatibility fallback. With OpenXR 1.0,
-    // Quest 3 Touch Plus has a device-specific profile behind XR_META_touch_controller_plus.
-    if (!suggestProfile("/interaction_profiles/oculus/touch_controller")) {
-        LOGE("failed to suggest Oculus Touch bindings");
-        return false;
-    }
-    if (touchPlusExt && !suggestProfile("/interaction_profiles/meta/touch_plus_controller")) {
-        LOGW("Touch Plus device-specific binding suggestion failed; legacy Touch profile remains available");
-    }
+    if (!suggest("/interaction_profiles/oculus/touch_controller")) return false;
+    if (touchPlusExt && !suggest("/interaction_profiles/meta/touch_plus_controller"))
+        LOGW("Touch Plus binding suggestion failed; using legacy Touch profile");
 
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     attach.countActionSets = 1;
@@ -416,28 +441,23 @@ bool setupActions(XrInstance inst, XrSession session, Actions& a, bool touchPlus
 
 XrActionStateBoolean getBool(XrSession s, XrAction a) {
     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
-    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
-    xrGetActionStateBoolean(s, &gi, &st);
-    return st;
+    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN}; xrGetActionStateBoolean(s, &gi, &st); return st;
 }
 XrActionStateFloat getFloat(XrSession s, XrAction a) {
     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
-    XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT};
-    xrGetActionStateFloat(s, &gi, &st);
-    return st;
+    XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT}; xrGetActionStateFloat(s, &gi, &st); return st;
 }
 XrActionStateVector2f getVec2(XrSession s, XrAction a) {
     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
-    XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F};
-    xrGetActionStateVector2f(s, &gi, &st);
-    return st;
+    XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F}; xrGetActionStateVector2f(s, &gi, &st); return st;
+}
+bool poseActive(XrSession s, XrAction a) {
+    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO}; gi.action = a;
+    XrActionStatePose st{XR_TYPE_ACTION_STATE_POSE};
+    return XR_SUCCEEDED(xrGetActionStatePose(s, &gi, &st)) && st.isActive;
 }
 
-struct BatteryReading {
-    bool valid = false;
-    bool charging = false;
-    float level = 0.0f;
-};
+struct BatteryReading { bool valid = false; bool charging = false; float level = 0; };
 
 BatteryReading getBatteryState(XrSession session, XrPath userPath) {
     BatteryReading result{};
@@ -455,14 +475,12 @@ BatteryReading getBatteryState(XrSession session, XrPath userPath) {
 uint32_t packBatteryState(const BatteryReading& left, const BatteryReading& right) {
     uint32_t packed = 0;
     if (left.valid) {
-        const uint32_t pct = static_cast<uint32_t>(std::lround(left.level * 100.0f));
-        packed |= std::min(pct, 100u);
+        packed |= std::min(static_cast<uint32_t>(std::lround(left.level * 100.0f)), 100u);
         packed |= 1u << 16;
         if (left.charging) packed |= 1u << 18;
     }
     if (right.valid) {
-        const uint32_t pct = static_cast<uint32_t>(std::lround(right.level * 100.0f));
-        packed |= std::min(pct, 100u) << 8;
+        packed |= std::min(static_cast<uint32_t>(std::lround(right.level * 100.0f)), 100u) << 8;
         packed |= 1u << 17;
         if (right.charging) packed |= 1u << 19;
     }
@@ -470,117 +488,140 @@ uint32_t packBatteryState(const BatteryReading& left, const BatteryReading& righ
 }
 
 void setHaptic(XrSession session, XrAction action, uint8_t intensity) {
-    XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
-    info.action = action;
-    if (intensity == 0) {
-        xrStopHapticFeedback(session, &info);
-        return;
-    }
-    XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
-    vibration.duration = 100'000'000; // 100 ms; refreshed before expiry
-    vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
-    vibration.amplitude = static_cast<float>(intensity) / 255.0f;
-    xrApplyHapticFeedback(
-        session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+    XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO}; info.action = action;
+    if (intensity == 0) { xrStopHapticFeedback(session, &info); return; }
+    XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
+    v.duration = 100'000'000; v.frequency = XR_FREQUENCY_UNSPECIFIED; v.amplitude = intensity / 255.0f;
+    xrApplyHapticFeedback(session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&v));
 }
 
 void setLowBrightnessAndKeepAwake(ANativeActivity* activity) {
     JNIEnv* env = nullptr;
     activity->vm->AttachCurrentThread(&env, nullptr);
     jobject act = activity->clazz;
-    jclass activityClass = env->GetObjectClass(act);
-    jmethodID getWindow = env->GetMethodID(activityClass, "getWindow", "()Landroid/view/Window;");
+    jclass ac = env->GetObjectClass(act);
+    jmethodID getWindow = env->GetMethodID(ac, "getWindow", "()Landroid/view/Window;");
     jobject window = env->CallObjectMethod(act, getWindow);
     if (window) {
-        jclass windowClass = env->GetObjectClass(window);
-        jmethodID addFlags = env->GetMethodID(windowClass, "addFlags", "(I)V");
-        // WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON = 0x80
-        env->CallVoidMethod(window, addFlags, 0x80);
-        jmethodID getAttrs = env->GetMethodID(windowClass, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;");
+        jclass wc = env->GetObjectClass(window);
+        env->CallVoidMethod(window, env->GetMethodID(wc, "addFlags", "(I)V"), 0x80);
+        jmethodID getAttrs = env->GetMethodID(wc, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;");
         jobject attrs = env->CallObjectMethod(window, getAttrs);
         if (attrs) {
-            jclass attrsClass = env->GetObjectClass(attrs);
-            jfieldID brightness = env->GetFieldID(attrsClass, "screenBrightness", "F");
-            env->SetFloatField(attrs, brightness, 0.0f);
-            jmethodID setAttrs = env->GetMethodID(windowClass, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V");
-            env->CallVoidMethod(window, setAttrs, attrs);
-            env->DeleteLocalRef(attrsClass);
-            env->DeleteLocalRef(attrs);
+            jclass alc = env->GetObjectClass(attrs);
+            env->SetFloatField(attrs, env->GetFieldID(alc, "screenBrightness", "F"), 0.0f);
+            env->CallVoidMethod(window, env->GetMethodID(wc, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V"), attrs);
+            env->DeleteLocalRef(alc); env->DeleteLocalRef(attrs);
         }
-        env->DeleteLocalRef(windowClass);
-        env->DeleteLocalRef(window);
+        env->DeleteLocalRef(wc); env->DeleteLocalRef(window);
     }
-    env->DeleteLocalRef(activityClass);
+    env->DeleteLocalRef(ac);
 }
 
 int getThermalStatus(ANativeActivity* activity) {
     JNIEnv* env = nullptr;
     activity->vm->AttachCurrentThread(&env, nullptr);
-    jobject act = activity->clazz;
     jclass contextClass = env->FindClass("android/content/Context");
-    jfieldID powerServiceField = env->GetStaticFieldID(contextClass, "POWER_SERVICE", "Ljava/lang/String;");
-    jobject powerService = env->GetStaticObjectField(contextClass, powerServiceField);
-    jclass activityClass = env->GetObjectClass(act);
-    jmethodID getSystemService = env->GetMethodID(activityClass, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
-    jobject pm = env->CallObjectMethod(act, getSystemService, powerService);
+    jfieldID powerField = env->GetStaticFieldID(contextClass, "POWER_SERVICE", "Ljava/lang/String;");
+    jobject powerName = env->GetStaticObjectField(contextClass, powerField);
+    jclass ac = env->GetObjectClass(activity->clazz);
+    jmethodID getService = env->GetMethodID(ac, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    jobject pm = env->CallObjectMethod(activity->clazz, getService, powerName);
     int value = -1;
     if (pm) {
-        jclass pmClass = env->GetObjectClass(pm);
-        jmethodID getCurrent = env->GetMethodID(pmClass, "getCurrentThermalStatus", "()I");
+        jclass pc = env->GetObjectClass(pm);
+        jmethodID getCurrent = env->GetMethodID(pc, "getCurrentThermalStatus", "()I");
         if (getCurrent) value = env->CallIntMethod(pm, getCurrent);
-        env->DeleteLocalRef(pmClass);
-        env->DeleteLocalRef(pm);
+        env->DeleteLocalRef(pc); env->DeleteLocalRef(pm);
     }
-    env->DeleteLocalRef(activityClass);
-    env->DeleteLocalRef(contextClass);
+    env->DeleteLocalRef(ac); env->DeleteLocalRef(contextClass);
     return value;
 }
 
-bool hasExtension(const char* name) {
+void requestLowRefreshRate(XrInstance instance, XrSession session) {
+    PFN_xrEnumerateDisplayRefreshRatesFB enumerate = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB request = nullptr;
+    xrGetInstanceProcAddr(instance, "xrEnumerateDisplayRefreshRatesFB", reinterpret_cast<PFN_xrVoidFunction*>(&enumerate));
+    xrGetInstanceProcAddr(instance, "xrRequestDisplayRefreshRateFB", reinterpret_cast<PFN_xrVoidFunction*>(&request));
+    if (!enumerate || !request) return;
     uint32_t count = 0;
-    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr))) return false;
-    std::vector<XrExtensionProperties> exts(count);
-    for (auto& e : exts) {
-        e.type = XR_TYPE_EXTENSION_PROPERTIES;
-        e.next = nullptr;
-    }
-    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, exts.data()))) return false;
-    for (const auto& e : exts) if (std::strcmp(e.extensionName, name) == 0) return true;
-    return false;
+    if (XR_FAILED(enumerate(session, 0, &count, nullptr)) || count == 0) return;
+    std::vector<float> rates(count);
+    if (XR_FAILED(enumerate(session, count, &count, rates.data()))) return;
+    float selected = rates.front();
+    for (float r : rates) if (std::fabs(r - 72.0f) < std::fabs(selected - 72.0f)) selected = r;
+    if (XR_SUCCEEDED(request(session, selected))) LOGI("requested display refresh %.1f Hz", selected);
 }
 
-void requestLowRefreshRate(XrInstance instance, XrSession session) {
-    PFN_xrEnumerateDisplayRefreshRatesFB enumerateRates = nullptr;
-    PFN_xrRequestDisplayRefreshRateFB requestRate = nullptr;
-    xrGetInstanceProcAddr(instance, "xrEnumerateDisplayRefreshRatesFB", reinterpret_cast<PFN_xrVoidFunction*>(&enumerateRates));
-    xrGetInstanceProcAddr(instance, "xrRequestDisplayRefreshRateFB", reinterpret_cast<PFN_xrVoidFunction*>(&requestRate));
-    if (!enumerateRates || !requestRate) return;
+struct MotionOutput {
+    uint32_t flags = 0;
+    XrQuaternionf orientation{};
+    XrVector3f position{};
+    XrVector3f angularLocal{};
+};
 
-    uint32_t count = 0;
-    if (XR_FAILED(enumerateRates(session, 0, &count, nullptr)) || count == 0) return;
-    std::vector<float> rates(count);
-    if (XR_FAILED(enumerateRates(session, count, &count, rates.data()))) return;
+void locateTracked(
+    XrSpace controllerSpace,
+    XrSpace localSpace,
+    XrTime time,
+    bool active,
+    bool left,
+    MotionOutput& out)
+{
+    const uint32_t activeBit = left ? MOTION_LEFT_ACTIVE : MOTION_RIGHT_ACTIVE;
+    const uint32_t ovBit = left ? MOTION_LEFT_OV : MOTION_RIGHT_OV;
+    const uint32_t otBit = left ? MOTION_LEFT_OT : MOTION_RIGHT_OT;
+    const uint32_t pvBit = left ? MOTION_LEFT_PV : MOTION_RIGHT_PV;
+    const uint32_t ptBit = left ? MOTION_LEFT_PT : MOTION_RIGHT_PT;
+    const uint32_t avBit = left ? MOTION_LEFT_AV : MOTION_RIGHT_AV;
+    if (!active) return;
+    out.flags |= activeBit;
 
-    // Prefer 72 Hz exactly. If unavailable, use the supported rate closest to 72 Hz.
-    float selected = rates.front();
-    float bestDistance = std::fabs(selected - 72.0f);
-    for (float rate : rates) {
-        const float distance = std::fabs(rate - 72.0f);
-        if (distance < bestDistance) {
-            selected = rate;
-            bestDistance = distance;
-        }
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    if (XR_SUCCEEDED(xrLocateSpace(controllerSpace, localSpace, time, &location))) {
+        if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) { out.flags |= ovBit; out.orientation = location.pose.orientation; }
+        if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) out.flags |= otBit;
+        if (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) { out.flags |= pvBit; out.position = location.pose.position; }
+        if (location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) out.flags |= ptBit;
     }
-    const XrResult r = requestRate(session, selected);
-    if (XR_SUCCEEDED(r)) LOGI("requested display refresh %.1f Hz", selected);
-    else LOGW("display refresh request %.1f Hz failed: %d", selected, r);
+
+    // Inverse locate makes the returned velocity expressed in controller space.
+    // Negating it yields controller angular velocity relative to LOCAL, still in
+    // controller-local axes. This is the closest public OpenXR path to a gyro-only
+    // stream without the host consuming orientation/position data.
+    XrSpaceVelocity inverseVelocity{XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation inverseLocation{XR_TYPE_SPACE_LOCATION};
+    inverseLocation.next = &inverseVelocity;
+    if (XR_SUCCEEDED(xrLocateSpace(localSpace, controllerSpace, time, &inverseLocation)) &&
+        (inverseVelocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
+        out.flags |= avBit;
+        out.angularLocal = {
+            -inverseVelocity.angularVelocity.x,
+            -inverseVelocity.angularVelocity.y,
+            -inverseVelocity.angularVelocity.z};
+    }
+}
+
+void locateAngularOnly(XrSpace controllerSpace, XrSpace localSpace, XrTime time, bool active, bool left, MotionOutput& out) {
+    const uint32_t activeBit = left ? MOTION_LEFT_ACTIVE : MOTION_RIGHT_ACTIVE;
+    const uint32_t avBit = left ? MOTION_LEFT_AV : MOTION_RIGHT_AV;
+    if (!active) return;
+    out.flags |= activeBit;
+    XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    location.next = &velocity;
+    if (XR_SUCCEEDED(xrLocateSpace(localSpace, controllerSpace, time, &location)) &&
+        (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
+        out.flags |= avBit;
+        out.angularLocal = {-velocity.angularVelocity.x, -velocity.angularVelocity.y, -velocity.angularVelocity.z};
+    }
 }
 
 } // namespace
 
 void android_main(android_app* app) {
     app_dummy();
-    LOGI("QuestPad v0.1 starting");
+    LOGI("QuestPad protocol v2 starting");
     setLowBrightnessAndKeepAwake(app->activity);
 
     JNIEnv* env = nullptr;
@@ -592,30 +633,23 @@ void android_main(android_app* app) {
         XrLoaderInitInfoAndroidKHR li{XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
         li.applicationVM = app->activity->vm;
         li.applicationContext = app->activity->clazz;
-        if (XR_FAILED(initializeLoader(reinterpret_cast<XrLoaderInitInfoBaseHeaderKHR*>(&li)))) {
-            LOGE("xrInitializeLoaderKHR failed");
-            return;
-        }
+        if (XR_FAILED(initializeLoader(reinterpret_cast<XrLoaderInitInfoBaseHeaderKHR*>(&li)))) return;
     }
 
-    std::vector<const char*> extensions;
-    if (!hasExtension(XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME)) {
-        LOGE("runtime lacks %s", XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME);
-        return;
-    }
-    extensions.push_back(XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME);
-    const bool perfExt = hasExtension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    if (!hasExtension(XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME)) return;
+    std::vector<const char*> extensions{XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME};
+    bool perfExt = hasExtension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    bool refreshExt = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    bool touchPlusExt = hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
+    bool batteryExt = hasExtension(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
     if (perfExt) extensions.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
-    const bool refreshExt = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     if (refreshExt) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
-    const bool touchPlusExt = hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     if (touchPlusExt) extensions.push_back(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
-    const bool batteryExt = hasExtension(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
     if (batteryExt) extensions.push_back(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
-    ici.applicationInfo.applicationVersion = 1;
+    ici.applicationInfo.applicationVersion = 3;
     std::strncpy(ici.applicationInfo.engineName, "QuestPadNative", XR_MAX_ENGINE_NAME_SIZE - 1);
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
@@ -624,76 +658,54 @@ void android_main(android_app* app) {
 
     XrInstance instance = XR_NULL_HANDLE;
     if (!xrOk(instance, xrCreateInstance(&ici, &instance), "xrCreateInstance")) return;
-
-    XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO};
-    sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO}; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
-    if (!xrOk(instance, xrGetSystem(instance, &sgi, &systemId), "xrGetSystem")) {
-        xrDestroyInstance(instance); return;
-    }
+    if (!xrOk(instance, xrGetSystem(instance, &sgi, &systemId), "xrGetSystem")) { xrDestroyInstance(instance); return; }
 
-    PFN_xrGetOpenGLESGraphicsRequirementsKHR getGlesReq = nullptr;
-    xrGetInstanceProcAddr(instance, "xrGetOpenGLESGraphicsRequirementsKHR", reinterpret_cast<PFN_xrVoidFunction*>(&getGlesReq));
-    if (!getGlesReq) {
-        LOGE("xrGetOpenGLESGraphicsRequirementsKHR unavailable");
-        xrDestroyInstance(instance); return;
-    }
+    PFN_xrGetOpenGLESGraphicsRequirementsKHR getReq = nullptr;
+    xrGetInstanceProcAddr(instance, "xrGetOpenGLESGraphicsRequirementsKHR", reinterpret_cast<PFN_xrVoidFunction*>(&getReq));
     XrGraphicsRequirementsOpenGLESKHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR};
-    if (!xrOk(instance, getGlesReq(instance, systemId, &req), "xrGetOpenGLESGraphicsRequirementsKHR")) {
-        xrDestroyInstance(instance); return;
-    }
+    if (!getReq || !xrOk(instance, getReq(instance, systemId, &req), "xrGetOpenGLESGraphicsRequirementsKHR")) { xrDestroyInstance(instance); return; }
 
     EglState egl;
-    if (!createEgl(egl)) {
-        LOGE("EGL creation failed");
-        xrDestroyInstance(instance); return;
-    }
-
-    XrGraphicsBindingOpenGLESAndroidKHR binding{XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR};
-    binding.display = egl.display;
-    binding.config = egl.config;
-    binding.context = egl.context;
-    XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};
-    sci.next = &binding;
-    sci.systemId = systemId;
+    if (!createEgl(egl)) { xrDestroyInstance(instance); return; }
+    XrGraphicsBindingOpenGLESAndroidKHR gb{XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR};
+    gb.display = egl.display; gb.config = egl.config; gb.context = egl.context;
+    XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO}; sci.next = &gb; sci.systemId = systemId;
     XrSession session = XR_NULL_HANDLE;
-    if (!xrOk(instance, xrCreateSession(instance, &sci, &session), "xrCreateSession")) {
-        destroyEgl(egl); xrDestroyInstance(instance); return;
-    }
+    if (!xrOk(instance, xrCreateSession(instance, &sci, &session), "xrCreateSession")) { destroyEgl(egl); xrDestroyInstance(instance); return; }
 
     Actions actions;
-    if (!setupActions(instance, session, actions, touchPlusExt)) {
-        xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance); return;
-    }
+    if (!setupActions(instance, session, actions, touchPlusExt)) { xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance); return; }
 
-    XrPath leftUserPath = XR_NULL_PATH;
-    XrPath rightUserPath = XR_NULL_PATH;
+    XrReferenceSpaceCreateInfo localInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    localInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    localInfo.poseInReferenceSpace = identityPose();
+    XrSpace localSpace = XR_NULL_HANDLE;
+    if (!xrOk(instance, xrCreateReferenceSpace(session, &localInfo, &localSpace), "xrCreateReferenceSpace")) return;
+
+    auto makeActionSpace = [&](XrAction action, XrSpace& space) {
+        XrActionSpaceCreateInfo ci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        ci.action = action; ci.poseInActionSpace = identityPose();
+        return xrOk(instance, xrCreateActionSpace(session, &ci, &space), "xrCreateActionSpace");
+    };
+    XrSpace leftSpace = XR_NULL_HANDLE, rightSpace = XR_NULL_HANDLE;
+    if (!makeActionSpace(actions.lPose, leftSpace) || !makeActionSpace(actions.rPose, rightSpace)) return;
+
+    XrPath leftUserPath = XR_NULL_PATH, rightUserPath = XR_NULL_PATH;
     xrStringToPath(instance, "/user/hand/left", &leftUserPath);
     xrStringToPath(instance, "/user/hand/right", &rightUserPath);
-    LOGI("controller battery telemetry: %s", batteryExt ? "OpenXR extension available" : "runtime extension unavailable");
 
-    BridgeServer bridge;
-    bridge.start();
-
-    bool resumed = false;
-    bool sessionActive = false;
-    bool focused = false;
+    BridgeServer bridge; bridge.start();
+    bool resumed = false, sessionActive = false, focused = false, quit = false, exitRequested = false;
     XrSessionState sessionState = XR_SESSION_STATE_UNKNOWN;
-    bool quit = false;
-    bool exitRequested = false;
     uint32_t sequence = 0;
-    uint64_t exitStartNs = 0;
-    bool leftShoulderPressed = false;
-    bool rightShoulderPressed = false;
-    uint8_t exitPulseStage = 0;
-    uint8_t exitPulseStrength = 0;
-    uint64_t exitPulseUntilNs = 0;
+    uint64_t exitStartNs = 0, nextThermalPoll = 0, nextBatteryPoll = 0, exitPulseUntilNs = 0, nextHapticRefresh = 0;
+    bool leftShoulder = false, rightShoulder = false;
+    uint8_t exitPulseStage = 0, exitPulseStrength = 0;
     int thermal = -1;
-    uint64_t nextThermalPoll = 0;
-    uint64_t nextBatteryPoll = 0;
     uint32_t batteryPacked = 0;
     uint16_t lastRumble = 0;
-    uint64_t nextHapticRefresh = 0;
 
     app->userData = &resumed;
     app->onAppCmd = [](android_app* a, int32_t cmd) {
@@ -704,8 +716,7 @@ void android_main(android_app* app) {
     };
 
     while (!quit && !app->destroyRequested) {
-        int events = 0;
-        android_poll_source* source = nullptr;
+        int events = 0; android_poll_source* source = nullptr;
         while (ALooper_pollOnce(sessionActive ? 0 : 10, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0) {
             if (source) source->process(app, source);
             if (app->destroyRequested) { quit = true; break; }
@@ -715,27 +726,18 @@ void android_main(android_app* app) {
         XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
         while (xrPollEvent(instance, &event) == XR_SUCCESS) {
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
-                const auto* changed = reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
+                auto* changed = reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
                 sessionState = changed->state;
                 focused = changed->state == XR_SESSION_STATE_FOCUSED;
                 if (changed->state == XR_SESSION_STATE_STOPPING && sessionActive) {
-                    xrEndSession(session);
-                    sessionActive = false;
-                    focused = false;
-                    LOGI("XR session stopped");
-                } else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING) {
-                    quit = true;
-                }
+                    xrEndSession(session); sessionActive = false; focused = false;
+                } else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING) quit = true;
             }
             event = {XR_TYPE_EVENT_DATA_BUFFER};
         }
 
-        // Match the NativeActivity lifecycle: do not begin an immersive session before
-        // the Android activity is resumed. Remembering sessionState avoids relying on a
-        // second READY event if RESUME arrives slightly later.
         if (!sessionActive && resumed && sessionState == XR_SESSION_STATE_READY) {
-            XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
-            bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+            XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO}; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
             if (XR_SUCCEEDED(xrBeginSession(session, &bi))) {
                 sessionActive = true;
                 LOGI("XR session active");
@@ -743,9 +745,6 @@ void android_main(android_app* app) {
                     PFN_xrPerfSettingsSetPerformanceLevelEXT setPerf = nullptr;
                     xrGetInstanceProcAddr(instance, "xrPerfSettingsSetPerformanceLevelEXT", reinterpret_cast<PFN_xrVoidFunction*>(&setPerf));
                     if (setPerf) {
-                        // Keep both domains in a thermally sustainable low-complexity mode.
-                        // POWER_SAVINGS is intentionally avoided because the extension allows
-                        // runtimes to deprioritize low latency at that level.
                         setPerf(session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
                         setPerf(session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
                     }
@@ -753,27 +752,19 @@ void android_main(android_app* app) {
                 if (refreshExt) requestLowRefreshRate(instance, session);
             }
         }
-
         if (!sessionActive) continue;
 
-        XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
-        XrFrameState fs{XR_TYPE_FRAME_STATE};
+        XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO}; XrFrameState fs{XR_TYPE_FRAME_STATE};
         if (XR_FAILED(xrWaitFrame(session, &wi, &fs))) continue;
-        XrFrameBeginInfo fi{XR_TYPE_FRAME_BEGIN_INFO};
-        if (XR_FAILED(xrBeginFrame(session, &fi))) continue;
+        XrFrameBeginInfo fi{XR_TYPE_FRAME_BEGIN_INFO}; if (XR_FAILED(xrBeginFrame(session, &fi))) continue;
 
-        XrActiveActionSet active{actions.set, XR_NULL_PATH};
-        XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
-        sync.countActiveActionSets = 1;
-        sync.activeActionSets = &active;
+        FeedbackState feedback = bridge.pollFeedback();
+        uint16_t motionRequest = feedback.control & 0x3u;
 
         PadPacket packet{};
-        packet.magic = kMagic;
-        packet.version = kProtocolVersion;
-        packet.size = sizeof(PadPacket);
-        packet.sequence = sequence++;
-        packet.monotonicNs = monoNs();
-        const bool effectiveFocused = focused && resumed && !exitRequested;
+        packet.magic = kMagic; packet.version = kProtocolVersion; packet.size = sizeof(PadPacket);
+        packet.sequence = sequence++; packet.monotonicNs = monoNs();
+        bool effectiveFocused = focused && resumed && !exitRequested;
         if (sessionActive) packet.flags |= FLAG_SESSION_ACTIVE;
         if (effectiveFocused) packet.flags |= FLAG_FOCUSED;
 
@@ -783,20 +774,18 @@ void android_main(android_app* app) {
         }
         packet.thermalStatus = thermal;
 
+        XrActiveActionSet active{actions.set, XR_NULL_PATH};
+        XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO}; sync.countActiveActionSets = 1; sync.activeActionSets = &active;
+
         if (!effectiveFocused) {
-            leftShoulderPressed = false;
-            rightShoulderPressed = false;
-            exitStartNs = 0;
-            exitPulseStage = 0;
+            leftShoulder = rightShoulder = false;
+            exitStartNs = 0; exitPulseStage = 0;
         }
 
         if (effectiveFocused && XR_SUCCEEDED(xrSyncActions(session, &sync))) {
-            const auto ls = getVec2(session, actions.lStick);
-            const auto rs = getVec2(session, actions.rStick);
-            const auto lt = getFloat(session, actions.lTrigger);
-            const auto rt = getFloat(session, actions.rTrigger);
-            const auto lg = getFloat(session, actions.lGrip);
-            const auto rg = getFloat(session, actions.rGrip);
+            auto ls = getVec2(session, actions.lStick); auto rs = getVec2(session, actions.rStick);
+            auto lt = getFloat(session, actions.lTrigger); auto rt = getFloat(session, actions.rTrigger);
+            auto lg = getFloat(session, actions.lGrip); auto rg = getFloat(session, actions.rGrip);
             if (ls.isActive || lt.isActive || lg.isActive) packet.flags |= FLAG_LEFT_ACTIVE;
             if (rs.isActive || rt.isActive || rg.isActive) packet.flags |= FLAG_RIGHT_ACTIVE;
             if (ls.isActive) { packet.lx = ls.currentState.x; packet.ly = ls.currentState.y; }
@@ -806,24 +795,7 @@ void android_main(android_app* app) {
             if (lg.isActive) packet.lg = std::clamp(lg.currentState, 0.0f, 1.0f);
             if (rg.isActive) packet.rg = std::clamp(rg.currentState, 0.0f, 1.0f);
 
-            // Treat the Touch Plus grip squeezes as the logical Xbox LB/RB buttons.
-            // Hysteresis matches the Windows mapper so the exit gesture works on the
-            // same comfortable squeeze used during normal gameplay instead of requiring
-            // an unusually hard >75% grip press.
-            auto updateShoulder = [](bool& latched, float value) {
-                if (latched) {
-                    if (value <= kShoulderReleaseThreshold) latched = false;
-                } else if (value >= kShoulderPressThreshold) {
-                    latched = true;
-                }
-            };
-            updateShoulder(leftShoulderPressed, packet.lg);
-            updateShoulder(rightShoulderPressed, packet.rg);
-
-            auto pressed = [&](XrAction action) {
-                const auto st = getBool(session, action);
-                return st.isActive && st.currentState;
-            };
+            auto pressed = [&](XrAction action) { auto st = getBool(session, action); return st.isActive && st.currentState; };
             if (pressed(actions.a)) packet.buttons |= BTN_A;
             if (pressed(actions.b)) packet.buttons |= BTN_B;
             if (pressed(actions.x)) packet.buttons |= BTN_X;
@@ -832,113 +804,91 @@ void android_main(android_app* app) {
             if (pressed(actions.rThumb)) packet.buttons |= BTN_RTHUMB;
             if (pressed(actions.view)) packet.buttons |= BTN_VIEW;
 
-            // Battery polling is intentionally slow: battery state is display telemetry,
-            // not latency-sensitive controller input. The ratified OpenXR extension is
-            // optional; runtimes that do not expose it simply leave both validity bits 0.
+            auto shoulder = [](bool& latched, float value) {
+                if (latched) { if (value <= kShoulderReleaseThreshold) latched = false; }
+                else if (value >= kShoulderPressThreshold) latched = true;
+            };
+            shoulder(leftShoulder, packet.lg); shoulder(rightShoulder, packet.rg);
+
             if (batteryExt && packet.monotonicNs >= nextBatteryPoll) {
-                const BatteryReading leftBattery = getBatteryState(session, leftUserPath);
-                const BatteryReading rightBattery = getBatteryState(session, rightUserPath);
-                batteryPacked = packBatteryState(leftBattery, rightBattery);
+                batteryPacked = packBatteryState(getBatteryState(session, leftUserPath), getBatteryState(session, rightUserPath));
                 nextBatteryPoll = packet.monotonicNs + 5'000'000'000ULL;
             }
             packet.reserved = batteryPacked;
 
-            // Exit is expressed in Xbox terms: LS + RS + LB + RB for 3 s.
-            // LB/RB are the physical Touch Plus grip squeezes, normalized above with
-            // hysteresis. This keeps the gesture deliberate but comfortable.
-            const bool exitChord =
-                (packet.buttons & BTN_LTHUMB) && (packet.buttons & BTN_RTHUMB) &&
-                leftShoulderPressed && rightShoulderPressed;
+            bool lPoseActive = poseActive(session, actions.lPose);
+            bool rPoseActive = poseActive(session, actions.rPose);
+            if (motionRequest != MOTION_REQUEST_NONE) packet.motionFlags |= MOTION_QUERIED;
+
+            if (motionRequest == MOTION_REQUEST_RIGHT_ANGULAR) {
+                MotionOutput right{};
+                locateAngularOnly(rightSpace, localSpace, fs.predictedDisplayTime, rPoseActive, false, right);
+                packet.motionFlags |= right.flags;
+                packet.rightAngularLocal = right.angularLocal;
+            } else if (motionRequest == MOTION_REQUEST_RIGHT_TRACKED) {
+                MotionOutput right{};
+                locateTracked(rightSpace, localSpace, fs.predictedDisplayTime, rPoseActive, false, right);
+                packet.motionFlags |= right.flags;
+                packet.rightOrientation = right.orientation; packet.rightPosition = right.position;
+                packet.rightAngularLocal = right.angularLocal;
+            } else if (motionRequest == MOTION_REQUEST_BOTH_TRACKED) {
+                MotionOutput left{}, right{};
+                locateTracked(leftSpace, localSpace, fs.predictedDisplayTime, lPoseActive, true, left);
+                locateTracked(rightSpace, localSpace, fs.predictedDisplayTime, rPoseActive, false, right);
+                packet.motionFlags |= left.flags | right.flags;
+                packet.leftOrientation = left.orientation; packet.rightOrientation = right.orientation;
+                packet.leftPosition = left.position; packet.rightPosition = right.position;
+                packet.leftAngularLocal = left.angularLocal; packet.rightAngularLocal = right.angularLocal;
+            }
+
+            bool exitChord = (packet.buttons & BTN_LTHUMB) && (packet.buttons & BTN_RTHUMB) && leftShoulder && rightShoulder;
             if (exitChord) {
                 if (exitStartNs == 0) exitStartNs = packet.monotonicNs;
                 packet.flags |= FLAG_EXIT_ARMED;
-
-                // Do not leak LS/RS/LB/RB into the emulated controller while the exit
-                // gesture is armed.
-                packet.buttons &= ~(BTN_LTHUMB | BTN_RTHUMB);
-                packet.lg = 0.0f;
-                packet.rg = 0.0f;
-
-                const uint64_t heldNs = packet.monotonicNs - exitStartNs;
-                auto cueExitStage = [&](uint8_t stage, uint8_t strength) {
-                    if (exitPulseStage < stage) {
-                        exitPulseStage = stage;
-                        exitPulseStrength = strength;
-                        exitPulseUntilNs = packet.monotonicNs + kExitPulseNs;
-                    }
+                packet.buttons &= ~(BTN_LTHUMB | BTN_RTHUMB); packet.lg = packet.rg = 0;
+                uint64_t held = packet.monotonicNs - exitStartNs;
+                auto cue = [&](uint8_t stage, uint8_t strength) {
+                    if (exitPulseStage < stage) { exitPulseStage = stage; exitPulseStrength = strength; exitPulseUntilNs = packet.monotonicNs + kExitPulseNs; }
                 };
-                if (heldNs >= 1'000'000'000ULL) cueExitStage(1, 80);
-                if (heldNs >= 2'000'000'000ULL) cueExitStage(2, 150);
-                if (heldNs >= kExitHoldNs && !exitRequested) {
-                    cueExitStage(3, 255);
-                    LOGI("LS+RS+LB+RB held for 3 seconds; requesting exit");
-                    packet.lx = packet.ly = packet.rx = packet.ry = 0.0f;
-                    packet.lt = packet.rt = packet.lg = packet.rg = 0.0f;
-                    packet.buttons = 0;
-                    packet.flags &= ~FLAG_FOCUSED;
+                if (held >= 1'000'000'000ULL) cue(1, 80);
+                if (held >= 2'000'000'000ULL) cue(2, 150);
+                if (held >= kExitHoldNs && !exitRequested) {
+                    cue(3, 255); packet = PadPacket{}; packet.magic = kMagic; packet.version = kProtocolVersion;
+                    packet.size = sizeof(PadPacket); packet.sequence = sequence++; packet.monotonicNs = monoNs(); packet.thermalStatus = thermal;
                     exitRequested = true;
-                    const XrResult exitResult = xrRequestExitSession(session);
-                    if (XR_FAILED(exitResult)) {
-                        LOGW("xrRequestExitSession failed: %d", exitResult);
-                        quit = true;
-                    }
+                    if (XR_FAILED(xrRequestExitSession(session))) quit = true;
                 }
-            } else {
-                exitStartNs = 0;
-                exitPulseStage = 0;
-            }
+            } else { exitStartNs = 0; exitPulseStage = 0; }
         }
 
-        // If the app loses XR focus, the packet stays neutral by construction.
         bridge.sendPacket(packet);
 
-        // Reverse feedback path: preserve the Xbox 360 two-motor distinction by
-        // mapping the large/low-frequency motor to the left Touch controller and
-        // the small/high-frequency motor to the right. OpenXR runtimes choose the
-        // actual actuator frequency when XR_FREQUENCY_UNSPECIFIED is used.
-        const uint16_t rumble = bridge.pollRumble();
-        const uint8_t largeMotor = static_cast<uint8_t>((rumble >> 8) & 0xFF);
-        const uint8_t smallMotor = static_cast<uint8_t>(rumble & 0xFF);
-        const bool exitCueActive =
-            exitPulseStrength != 0 && packet.monotonicNs < exitPulseUntilNs;
-        if (exitCueActive) {
-            // Exit countdown feedback intentionally overrides game rumble for a very
-            // short pulse on both controllers: 1 s, 2 s, then confirmation at 3 s.
-            setHaptic(session, actions.lHaptic, exitPulseStrength);
-            setHaptic(session, actions.rHaptic, exitPulseStrength);
-            lastRumble = 0;
-            nextHapticRefresh = 0;
+        uint16_t rumble = (static_cast<uint16_t>(feedback.large) << 8) | feedback.small;
+        bool exitCue = exitPulseStrength != 0 && packet.monotonicNs < exitPulseUntilNs;
+        if (exitCue) {
+            setHaptic(session, actions.lHaptic, exitPulseStrength); setHaptic(session, actions.rHaptic, exitPulseStrength);
+            lastRumble = 0; nextHapticRefresh = 0;
         } else if (!effectiveFocused || rumble == 0) {
-            if (lastRumble != 0 || exitPulseStrength != 0) {
-                setHaptic(session, actions.lHaptic, 0);
-                setHaptic(session, actions.rHaptic, 0);
-            }
-            exitPulseStrength = 0;
-            lastRumble = 0;
-            nextHapticRefresh = 0;
+            if (lastRumble != 0 || exitPulseStrength != 0) { setHaptic(session, actions.lHaptic, 0); setHaptic(session, actions.rHaptic, 0); }
+            exitPulseStrength = 0; lastRumble = 0; nextHapticRefresh = 0;
         } else if (rumble != lastRumble || packet.monotonicNs >= nextHapticRefresh) {
-            setHaptic(session, actions.lHaptic, largeMotor);
-            setHaptic(session, actions.rHaptic, smallMotor);
-            lastRumble = rumble;
-            nextHapticRefresh = packet.monotonicNs + 75'000'000ULL;
+            setHaptic(session, actions.lHaptic, feedback.large); setHaptic(session, actions.rHaptic, feedback.small);
+            lastRumble = rumble; nextHapticRefresh = packet.monotonicNs + 75'000'000ULL;
         }
 
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
-        ei.displayTime = fs.predictedDisplayTime;
-        ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        ei.layerCount = 0;
-        ei.layers = nullptr;
-        xrEndFrame(session, &ei);
+        ei.displayTime = fs.predictedDisplayTime; ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        ei.layerCount = 0; ei.layers = nullptr; xrEndFrame(session, &ei);
     }
 
-    setHaptic(session, actions.lHaptic, 0);
-    setHaptic(session, actions.rHaptic, 0);
+    setHaptic(session, actions.lHaptic, 0); setHaptic(session, actions.rHaptic, 0);
     bridge.stop();
     if (sessionActive) xrEndSession(session);
+    if (leftSpace != XR_NULL_HANDLE) xrDestroySpace(leftSpace);
+    if (rightSpace != XR_NULL_HANDLE) xrDestroySpace(rightSpace);
+    if (localSpace != XR_NULL_HANDLE) xrDestroySpace(localSpace);
     if (actions.set != XR_NULL_HANDLE) xrDestroyActionSet(actions.set);
-    xrDestroySession(session);
-    destroyEgl(egl);
-    xrDestroyInstance(instance);
+    xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance);
     app->activity->vm->DetachCurrentThread();
     LOGI("QuestPad stopped");
 }
