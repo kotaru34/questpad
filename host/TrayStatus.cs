@@ -11,6 +11,7 @@ internal readonly record struct HostSnapshot(
     double Hz,
     long Drops,
     string Thermal,
+    double? QuestBatteryTempC,
     int? LeftBattery,
     int? RightBattery,
     string BatterySource,
@@ -23,7 +24,7 @@ internal sealed class HostStatus
 {
     private readonly object _gate = new();
     private HostSnapshot _value = new(
-        false, false, false, 0, 0, "N/A", null, null, "n/a",
+        false, false, false, 0, 0, "N/A", null, null, null, "n/a",
         "starting", false, "off", "off");
 
     private int? _openXrLeftBattery;
@@ -101,6 +102,11 @@ internal sealed class HostStatus
         }
     }
 
+    public void UpdateAdbBatteryTemperature(double? temperatureC)
+    {
+        lock (_gate) _value = _value with { QuestBatteryTempC = temperatureC };
+    }
+
     private void ResolveBatteries(out int? left, out int? right, out string source)
     {
         left = _openXrLeftBattery ?? _adbLeftBattery;
@@ -162,6 +168,7 @@ internal sealed class TrayStatus : IDisposable
         var rightBattery = Disabled("Right controller: n/a");
         var batterySource = Disabled("Battery source: n/a");
         var thermal = Disabled("Thermal: n/a");
+        var batteryTemp = Disabled("Quest battery temp: n/a");
         var cadence = Disabled("Input: 0.0 Hz");
 
         var outputMenu = new ToolStripMenuItem("Output backend");
@@ -207,7 +214,7 @@ internal sealed class TrayStatus : IDisposable
         _menu.Items.AddRange(new ToolStripItem[]
         {
             title, new ToolStripSeparator(), connection, gamepad, outputStatus, gyroStatus, steeringStatus,
-            leftBattery, rightBattery, batterySource, thermal, cadence,
+            leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
             new ToolStripSeparator(), outputMenu, gyroMenu, gyroSmooth, steeringMenu, steeringRange, calibrate,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
@@ -237,6 +244,7 @@ internal sealed class TrayStatus : IDisposable
             rightBattery.Text = $"Right controller: {BatteryText(s.RightBattery)}";
             batterySource.Text = $"Battery source: {s.BatterySource}";
             thermal.Text = $"Thermal: {s.Thermal}";
+            batteryTemp.Text = $"Quest battery temp: {TemperatureText(s.QuestBatteryTempC)}";
             cadence.Text = $"Input: {s.Hz:F1} Hz   drops: {s.Drops}";
 
             outputXbox.Checked = cfg.Output == OutputMode.Xbox360;
@@ -316,6 +324,7 @@ internal sealed class TrayStatus : IDisposable
     }
 
     private static string BatteryText(int? value) => value.HasValue ? $"{value.Value}%" : "n/a";
+    private static string TemperatureText(double? value) => value.HasValue ? $"{value.Value:F1} °C (ADB battery)" : "n/a";
 
     public void Dispose()
     {
