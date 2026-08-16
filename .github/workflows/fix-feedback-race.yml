@@ -19,48 +19,31 @@ jobs:
           from pathlib import Path
           p = Path('quest/src/main/cpp/questpad.cpp')
           s = p.read_text(encoding='utf-8')
-          old = '''            const int old = clientFd_.exchange(c);
+
+          old = """            const int old = clientFd_.exchange(c);
                       if (old >= 0) close(old);
                       rumblePacked_.store(0, std::memory_order_relaxed);
                       feedbackBytes_ = 0;
-          '''
-          new = '''            const int old = clientFd_.exchange(c);
-                      if (old >= 0) close(old);
-                      rumblePacked_.store(0, std::memory_order_relaxed);
-          '''
+          """
+          # YAML de-indentation can make embedded literal indentation brittle, so use
+          # direct line replacements below for the actual file text.
+          old = "            const int old = clientFd_.exchange(c);\n            if (old >= 0) close(old);\n            rumblePacked_.store(0, std::memory_order_relaxed);\n            feedbackBytes_ = 0;\n"
+          new = "            const int old = clientFd_.exchange(c);\n            if (old >= 0) close(old);\n            rumblePacked_.store(0, std::memory_order_relaxed);\n"
           if s.count(old) != 1:
               raise SystemExit(f'expected one accept-handoff block, got {s.count(old)}')
           s = s.replace(old, new, 1)
-          old2 = '''    uint16_t pollRumble() {
-                  int fd = clientFd_.load(std::memory_order_relaxed);
-                  if (fd < 0) {
-          '''
-          new2 = '''    uint16_t pollRumble() {
-                  int fd = clientFd_.load(std::memory_order_relaxed);
-                  // accept() runs on a separate thread. Keep the framing buffer entirely
-                  // owned by this XR thread and reset it when the published client fd changes.
-                  if (fd != feedbackFd_) {
-                      feedbackFd_ = fd;
-                      feedbackBytes_ = 0;
-                      rumblePacked_.store(0, std::memory_order_relaxed);
-                  }
-                  if (fd < 0) {
-          '''
-          if s.count(old2) != 1:
-              raise SystemExit(f'expected one pollRumble prologue, got {s.count(old2)}')
-          s = s.replace(old2, new2, 1)
-          old3 = '''    uint8_t feedbackBuf_[sizeof(RumblePacket)]{};
-                  size_t feedbackBytes_ = 0;
-                  std::thread thread_;
-          '''
-          new3 = '''    uint8_t feedbackBuf_[sizeof(RumblePacket)]{};
-                  size_t feedbackBytes_ = 0;
-                  int feedbackFd_ = -1; // XR-thread-owned connection generation marker
-                  std::thread thread_;
-          '''
-          if s.count(old3) != 1:
-              raise SystemExit(f'expected one feedback field block, got {s.count(old3)}')
-          p.write_text(s.replace(old3, new3, 1), encoding='utf-8')
+
+          old = "    uint16_t pollRumble() {\n        int fd = clientFd_.load(std::memory_order_relaxed);\n        if (fd < 0) {\n"
+          new = "    uint16_t pollRumble() {\n        int fd = clientFd_.load(std::memory_order_relaxed);\n        // accept() runs on a separate thread. Keep the framing buffer entirely\n        // owned by this XR thread and reset it when the published client fd changes.\n        if (fd != feedbackFd_) {\n            feedbackFd_ = fd;\n            feedbackBytes_ = 0;\n            rumblePacked_.store(0, std::memory_order_relaxed);\n        }\n        if (fd < 0) {\n"
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one pollRumble prologue, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          old = "    uint8_t feedbackBuf_[sizeof(RumblePacket)]{};\n    size_t feedbackBytes_ = 0;\n    std::thread thread_;\n"
+          new = "    uint8_t feedbackBuf_[sizeof(RumblePacket)]{};\n    size_t feedbackBytes_ = 0;\n    int feedbackFd_ = -1; // XR-thread-owned connection generation marker\n    std::thread thread_;\n"
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one feedback field block, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
       - name: Commit race fix
         run: |
           git config user.name 'questpad-ci'
