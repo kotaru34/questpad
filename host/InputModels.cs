@@ -57,7 +57,17 @@ internal sealed class RuntimeSettings
 
     public void SetOutput(OutputMode output)
     {
-        lock (gate) value = value with { Output = output };
+        lock (gate)
+        {
+            // Native gyro has nowhere to go in XInput. Selecting Xbox explicitly
+            // therefore disables gyro instead of silently spending Quest tracking
+            // power on data that the active backend cannot expose.
+            value = value with
+            {
+                Output = output,
+                GyroSource = output == OutputMode.Xbox360 ? GyroSourceMode.Off : value.GyroSource
+            };
+        }
     }
 
     public void SetGyroSource(GyroSourceMode source)
