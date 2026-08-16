@@ -1,16 +1,15 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace QuestPad.Host;
 
 /// <summary>
-/// Best-effort fallback for Quest runtimes that do not expose controller battery
-/// through XR_EXT_interaction_profile_battery_state_display yet.
-///
-/// Horizon OS exposes the paired Touch controller state through the shell-only
-/// OVRRemoteService dumpsys service. Since QuestPad already requires an ADB link
-/// for transport, the Windows host can query that service without adding any
-/// privilege or background work to the Quest APK itself.
+/// Slow, best-effort ADB telemetry poller. Controller battery data comes from
+/// Horizon's shell-side OVRRemoteService when OpenXR battery data is unavailable.
+/// The same 10-second loop also samples Android's battery temperature so motion
+/// A/B tests have a more sensitive heat trend than the coarse thermal-status enum.
+/// None of this work runs on the real-time controller transport thread.
 /// </summary>
 internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
 {
@@ -21,6 +20,10 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
     private static readonly Regex BatteryRegex = new(
         @"\bBattery:\s*(\d{1,3})\s*%",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex DeviceTemperatureRegex = new(
+        @"(?im)^\s*temperature:\s*(-?\d+)\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly string _adb;
     private readonly string? _serial;
@@ -43,30 +46,33 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
 
     private async Task LoopAsync(CancellationToken ct)
     {
-        bool loggedUnavailable = false;
+        bool controllerAvailabilityLogged = false;
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var result = await QueryAsync(ct);
+                QueryResult result = await QueryControllerBatteriesAsync(ct);
                 if (result.CommandSucceeded)
                 {
                     _status.UpdateAdbBatteries(result.Left, result.Right);
-                    if ((result.Left.HasValue || result.Right.HasValue) && !loggedUnavailable)
+                    if ((result.Left.HasValue || result.Right.HasValue) && !controllerAvailabilityLogged)
                     {
                         Console.WriteLine(
                             $"Controller battery fallback: ADB/OVRRemoteService " +
                             $"L={BatteryText(result.Left)} R={BatteryText(result.Right)}");
+                        controllerAvailabilityLogged = true;
                     }
-                    loggedUnavailable = result.Left.HasValue || result.Right.HasValue;
                 }
-                else if (!loggedUnavailable)
+                else if (!controllerAvailabilityLogged)
                 {
                     Console.WriteLine(
                         "Controller battery fallback unavailable; OpenXR battery telemetry will still be used if the Quest runtime exposes it.");
-                    loggedUnavailable = true;
+                    controllerAvailabilityLogged = true;
                 }
+
+                double? temperatureC = await QueryDeviceBatteryTemperatureAsync(ct);
+                _status.UpdateAdbBatteryTemperature(temperatureC);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -74,8 +80,8 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                // Battery telemetry must never affect input transport or XInput output.
-                Console.WriteLine($"Controller battery poll failed: {ex.Message}");
+                // Slow telemetry must never affect input transport or controller output.
+                Console.WriteLine($"ADB telemetry poll failed: {ex.Message}");
             }
 
             try
@@ -89,7 +95,22 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
         }
     }
 
-    private async Task<QueryResult> QueryAsync(CancellationToken ct)
+    private async Task<QueryResult> QueryControllerBatteriesAsync(CancellationToken ct)
+    {
+        CommandResult command = await RunShellAsync(ct, "dumpsys", "OVRRemoteService");
+        if (!command.Success) return default;
+        var (left, right) = Parse(command.Stdout);
+        return new QueryResult(true, left, right);
+    }
+
+    private async Task<double?> QueryDeviceBatteryTemperatureAsync(CancellationToken ct)
+    {
+        CommandResult command = await RunShellAsync(ct, "dumpsys", "battery");
+        if (!command.Success) return null;
+        return ParseDeviceBatteryTemperature(command.Stdout);
+    }
+
+    private async Task<CommandResult> RunShellAsync(CancellationToken ct, params string[] shellArguments)
     {
         var psi = new ProcessStartInfo(_adb)
         {
@@ -106,8 +127,8 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
         }
 
         psi.ArgumentList.Add("shell");
-        psi.ArgumentList.Add("dumpsys");
-        psi.ArgumentList.Add("OVRRemoteService");
+        foreach (string argument in shellArguments)
+            psi.ArgumentList.Add(argument);
 
         using var process = Process.Start(psi);
         if (process is null) return default;
@@ -130,10 +151,7 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
 
         string stdout = await stdoutTask;
         _ = await stderrTask;
-        if (process.ExitCode != 0) return default;
-
-        var (left, right) = Parse(stdout);
-        return new QueryResult(true, left, right);
+        return new CommandResult(process.ExitCode == 0, stdout);
     }
 
     internal static (int? Left, int? Right) Parse(string text)
@@ -158,6 +176,19 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
         return (left, right);
     }
 
+    internal static double? ParseDeviceBatteryTemperature(string text)
+    {
+        Match match = DeviceTemperatureRegex.Match(text);
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int tenthsC))
+            return null;
+
+        // Android dumpsys battery reports the standard battery temperature property in
+        // tenths of a degree Celsius. Reject obviously nonsensical values rather than
+        // presenting them as precise thermal telemetry.
+        double c = tenthsC / 10.0;
+        return c is >= -20.0 and <= 100.0 ? c : null;
+    }
+
     private static string BatteryText(int? value) => value.HasValue ? $"{value.Value}%" : "n/a";
 
     public async ValueTask DisposeAsync()
@@ -168,4 +199,5 @@ internal sealed class AdbControllerBatteryPoller : IAsyncDisposable
     }
 
     private readonly record struct QueryResult(bool CommandSucceeded, int? Left, int? Right);
+    private readonly record struct CommandResult(bool Success, string Stdout);
 }
