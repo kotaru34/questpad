@@ -1,17 +1,19 @@
 # QuestPad controller mapping
 
-QuestPad maps Touch Plus input into a backend-independent logical gamepad. The logical state can currently be emitted as Xbox 360/XInput or DualShock 4. The recommended gyro path adds native DS4 motion without changing where the user's buttons, sticks or triggers are located.
+QuestPad maps Touch Plus input into a backend-independent logical gamepad. The logical state can currently be emitted as Xbox 360/XInput or DualShock 4. The recommended gyro path adds native DS4 motion without changing the logical Xbox↔DS4 correspondence.
 
 ## Direct controls
+
+The v0.4 layout intentionally swaps the earlier shoulder/trigger placement after real-game testing: the **Touch index triggers** now act as the target controller's bumpers, while the **Touch grip analogs** act as its analog triggers.
 
 | Touch Plus | Logical / Xbox | DualShock 4 |
 |---|---|---|
 | Left thumbstick | Left Stick | Left Stick |
 | Right thumbstick | Right Stick | Right Stick |
-| Left trigger | LT analog | L2 analog |
-| Right trigger | RT analog | R2 analog |
-| Left grip squeeze | LB | L1 |
-| Right grip squeeze | RB | R1 |
+| Left index trigger | LB | L1 |
+| Right index trigger | RB | R1 |
+| Left grip squeeze | LT analog | L2 analog |
+| Right grip squeeze | RT analog | R2 analog |
 | A | A | Cross |
 | B | B | Circle |
 | X | X | Square |
@@ -19,7 +21,7 @@ QuestPad maps Touch Plus input into a backend-independent logical gamepad. The l
 | Left stick click | LS / L3 | L3 |
 | Right stick click | RS / R3 | R3 |
 
-Grip-to-shoulder conversion uses hysteresis: press at 0.62, release below 0.45.
+The source index triggers are analog but the target bumpers are digital, so trigger-to-shoulder conversion uses hysteresis: press at 0.62, release below 0.45. Grip values remain analog all the way to Xbox LT/RT or DS4 L2/R2.
 
 ## Menu modifier layer
 
@@ -30,11 +32,13 @@ The physical **left Menu** button is available to applications and acts as Start
 | Tap and release Menu | Start / Menu tap | Options tap |
 | Hold Menu by itself for 0.50 s | Start / Menu held | Options held |
 | Hold Menu + right stick | D-pad, including diagonals | D-pad, including diagonals |
-| Menu + R3 | Back / View held while R3 remains held | Share held while R3 remains held |
-| Menu + L3 | unchanged / no DS4 extra | Touchpad click held while L3 remains held |
-| Hold Menu + LT + RT for 0.75 s | Guide | PS Home |
+| Menu + L3 | Back / View held while L3 remains held | Share held while L3 remains held |
+| Menu + R3 | R3 remains available; no extra target button | Touchpad click held while R3 remains held |
+| Hold Menu + both grips (logical LT + RT) for 0.75 s | Guide | PS Home |
 
-Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 is a genuine held View/Share state rather than a short pulse. In DS4 mode Menu + L3 mirrors that behavior for the physical touchpad click; Xbox mode deliberately leaves Menu + L3 unchanged.
+D-pad/L3/R3 modifier actions should begin before the 0.50-second plain-Menu hold commits. **Guide/PS is deliberately different:** once both logical triggers are squeezed, the Guide chord takes priority over an already-eligible Start/Options hold and starts its own 0.75-second timer. This avoids the old timing race where a slightly sequential `Menu + LT + RT` press could never reach Guide/PS.
+
+Right-stick camera output is suppressed while the stick is being used as D-pad. `Menu + L3` is a genuine held View/Share state rather than a short pulse. In DS4 mode `Menu + R3` mirrors that held behavior for the physical touchpad click; Xbox mode has no touchpad target, so R3 itself remains available and the chord only suppresses an accidental Start/Menu pulse.
 
 ### Xbox ↔ DualShock 4 spatial equivalence
 
@@ -86,9 +90,9 @@ A transient tracking problem enters a neutral safety hold. A persistent fault di
 
 ### Optional light-grip clutch
 
-The clutch requires both grip analog values to exceed a low threshold (~0.12) before steering is emitted. Releasing either hand immediately makes steering neutral without changing the rest of the logical gamepad.
+The clutch requires both physical grip analog values to exceed a low threshold (~0.12) before steering is emitted. Releasing either hand immediately makes steering neutral without changing the rest of the logical gamepad.
 
-The threshold is intentionally far below the LB/RB shoulder threshold, so the user can lightly hold the fixture without needing a full bumper-producing squeeze.
+In the v0.4 gamepad layout those same grip analogs are also the normal LT/RT (L2/R2) sources. The steering clutch is only an additional safety gate for LX; it does not quantize or otherwise alter the analog trigger values.
 
 ### Position validity
 
@@ -96,11 +100,11 @@ Mounted steering is primarily orientation-based. When optical position is used a
 
 ## Exiting QuestPad
 
-Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` here are grip squeezes.
+Hold **both stick clicks + both physical grip squeezes** for **3 seconds**. In the v0.4 gamepad layout those grips are the controls mapped to logical **LT + RT / L2 + R2**.
 
 While the exit gesture is armed:
 
-- LS, RS, LB and RB are suppressed from the virtual controller;
+- L3, R3 and both grip/trigger outputs are suppressed from the virtual controller;
 - both Touch controllers pulse after 1 second;
 - another cue occurs after 2 seconds;
 - a stronger final confirmation occurs at 3 seconds;
