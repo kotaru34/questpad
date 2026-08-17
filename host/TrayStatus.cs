@@ -16,6 +16,7 @@ internal readonly record struct HostSnapshot(
     int? RightBattery,
     string BatterySource,
     string OutputBackend,
+    string QuestViewStatus,
     bool GyroValid,
     string GyroStatus,
     string SteeringStatus);
@@ -25,7 +26,7 @@ internal sealed class HostStatus
     private readonly object _gate = new();
     private HostSnapshot _value = new(
         false, false, false, 0, 0, "N/A", null, null, null, "n/a",
-        "starting", false, "off", "off");
+        "starting", "black / zero-layer", false, "off", "off");
 
     private int? _openXrLeftBattery;
     private int? _openXrRightBattery;
@@ -55,6 +56,11 @@ internal sealed class HostStatus
     public void SetOutputBackend(string name)
     {
         lock (_gate) _value = _value with { OutputBackend = name };
+    }
+
+    public void SetQuestViewStatus(string status)
+    {
+        lock (_gate) _value = _value with { QuestViewStatus = status };
     }
 
     public void UpdateMotionStatus(bool gyroValid, string gyroStatus, string steeringStatus)
@@ -165,6 +171,7 @@ internal sealed class TrayStatus : IDisposable
         var connection = Disabled("Quest: waiting");
         var gamepad = Disabled("Gamepad: starting");
         var outputStatus = Disabled("Output: starting");
+        var questViewStatus = Disabled("Quest view: black / zero-layer");
         var gyroStatus = Disabled("Gyro: off");
         var steeringStatus = Disabled("Steering: off");
         var leftBattery = Disabled("Left controller: n/a");
@@ -174,6 +181,11 @@ internal sealed class TrayStatus : IDisposable
         var batteryTemp = Disabled("Quest battery temp: n/a");
         var cadence = Disabled("Input: 0.0 Hz");
 
+        var questViewMenu = new ToolStripMenuItem("Quest view");
+        var viewBlack = CheckItem("Black / zero-layer (PC-only)", () => _settings.SetQuestView(QuestViewMode.Black));
+        var viewPassthrough = CheckItem("Passthrough (MR)", () => _settings.SetQuestView(QuestViewMode.Passthrough));
+        questViewMenu.DropDownItems.AddRange(new ToolStripItem[] { viewBlack, viewPassthrough });
+
         var outputMenu = new ToolStripMenuItem("Output backend");
         var outputXbox = CheckItem("Xbox 360 / XInput", () => _settings.SetOutput(OutputMode.Xbox360));
         var outputDs4 = CheckItem("DualShock 4 / native motion", () => _settings.SetOutput(OutputMode.DualShock4));
@@ -182,7 +194,7 @@ internal sealed class TrayStatus : IDisposable
         var gyroMenu = new ToolStripMenuItem("Gyro source (right Touch)");
         var gyroOff = CheckItem("Off", () => _settings.SetGyroSource(GyroSourceMode.Off));
         var gyroRate = CheckItem("Angular-rate only (recommended)", () => _settings.SetGyroSource(GyroSourceMode.AngularRate));
-        var gyroCamera = CheckItem("Camera-assisted tracked pose (experimental A/B)", () => _settings.SetGyroSource(GyroSourceMode.CameraAssisted));
+        var gyroCamera = CheckItem("Camera-assisted tracked pose (diagnostic A/B)", () => _settings.SetGyroSource(GyroSourceMode.CameraAssisted));
         gyroMenu.DropDownItems.AddRange(new ToolStripItem[] { gyroOff, gyroRate, gyroCamera });
 
         var gyroSmooth = new ToolStripMenuItem("Gyro smoothing");
@@ -192,12 +204,13 @@ internal sealed class TrayStatus : IDisposable
         var gsStrong = CheckItem("Strong", () => _settings.SetGyroSmoothing(SmoothingLevel.Strong));
         gyroSmooth.DropDownItems.AddRange(new ToolStripItem[] { gsOff, gsLight, gsMedium, gsStrong });
 
-        var steeringMenu = new ToolStripMenuItem("Steering wheel mode (experimental)");
+        // Steering remains available only as a deliberately limited experiment. The
+        // free-air/hybrid prototypes are no longer user-facing because QuestPad is not
+        // trying to replace a multi-turn native HID wheel.
+        var steeringMenu = new ToolStripMenuItem("Mounted steering experiment");
         var stOff = CheckItem("Off", () => _settings.SetSteering(SteeringMode.Off));
-        var stMounted = CheckItem("Mounted / rigid wheel", () => _settings.SetSteering(SteeringMode.Mounted));
-        var stFree = CheckItem("Free-air optical wheel", () => _settings.SetSteering(SteeringMode.FreeAir));
-        var stHybrid = CheckItem("Hybrid / optical + rigid fallback", () => _settings.SetSteering(SteeringMode.Hybrid));
-        steeringMenu.DropDownItems.AddRange(new ToolStripItem[] { stOff, stMounted, stFree, stHybrid });
+        var stMounted = CheckItem("Mounted / rigid wheel (experimental)", () => _settings.SetSteering(SteeringMode.Mounted));
+        steeringMenu.DropDownItems.AddRange(new ToolStripItem[] { stOff, stMounted });
 
         var steeringRange = new ToolStripMenuItem("Steering range");
         var range180 = CheckItem("180° total", () => _settings.SetSteeringRange(180));
@@ -236,9 +249,9 @@ internal sealed class TrayStatus : IDisposable
         _menu = new ContextMenuStrip();
         _menu.Items.AddRange(new ToolStripItem[]
         {
-            title, new ToolStripSeparator(), connection, gamepad, outputStatus, gyroStatus, steeringStatus,
-            leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
-            new ToolStripSeparator(), outputMenu, gyroMenu, gyroSmooth,
+            title, new ToolStripSeparator(), connection, gamepad, outputStatus, questViewStatus,
+            gyroStatus, steeringStatus, leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
+            new ToolStripSeparator(), questViewMenu, outputMenu, gyroMenu, gyroSmooth,
             steeringMenu, steeringRange, steeringSmooth, gripClutch, invertSteering, calibrate, disarm,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
@@ -262,6 +275,7 @@ internal sealed class TrayStatus : IDisposable
             gamepad.Text = !s.GamepadAvailable ? "Gamepad: unavailable" :
                 s.GamepadPaused ? "Gamepad: paused" : "Gamepad: active";
             outputStatus.Text = $"Output: {s.OutputBackend}";
+            questViewStatus.Text = $"Quest view: {s.QuestViewStatus}";
             gyroStatus.Text = $"Gyro: {s.GyroStatus}";
             steeringStatus.Text = $"Steering: {s.SteeringStatus}";
             leftBattery.Text = $"Left controller: {BatteryText(s.LeftBattery)}";
@@ -271,6 +285,8 @@ internal sealed class TrayStatus : IDisposable
             batteryTemp.Text = $"Quest battery temp: {TemperatureText(s.QuestBatteryTempC)}";
             cadence.Text = $"Input: {s.Hz:F1} Hz   drops: {s.Drops}";
 
+            viewBlack.Checked = cfg.QuestView == QuestViewMode.Black;
+            viewPassthrough.Checked = cfg.QuestView == QuestViewMode.Passthrough;
             outputXbox.Checked = cfg.Output == OutputMode.Xbox360;
             outputDs4.Checked = cfg.Output == OutputMode.DualShock4;
             gyroOff.Checked = cfg.GyroSource == GyroSourceMode.Off;
@@ -282,8 +298,6 @@ internal sealed class TrayStatus : IDisposable
             gsStrong.Checked = cfg.GyroSmoothing == SmoothingLevel.Strong;
             stOff.Checked = cfg.Steering == SteeringMode.Off;
             stMounted.Checked = cfg.Steering == SteeringMode.Mounted;
-            stFree.Checked = cfg.Steering == SteeringMode.FreeAir;
-            stHybrid.Checked = cfg.Steering == SteeringMode.Hybrid;
             range180.Checked = Math.Abs(cfg.SteeringRangeDegrees - 180) < 1;
             range240.Checked = Math.Abs(cfg.SteeringRangeDegrees - 240) < 1;
             range360.Checked = Math.Abs(cfg.SteeringRangeDegrees - 360) < 1;
@@ -296,13 +310,17 @@ internal sealed class TrayStatus : IDisposable
 
             if (pause.Checked != s.GamepadPaused) pause.Checked = s.GamepadPaused;
             pause.Enabled = s.GamepadAvailable;
-            calibrate.Enabled = s.Connected && cfg.Steering != SteeringMode.Off;
-            disarm.Enabled = cfg.Steering != SteeringMode.Off;
-            gripClutch.Enabled = cfg.Steering != SteeringMode.Off;
-            invertSteering.Enabled = cfg.Steering != SteeringMode.Off;
+
+            bool steeringEnabled = cfg.Steering == SteeringMode.Mounted;
+            calibrate.Enabled = s.Connected && steeringEnabled;
+            disarm.Enabled = steeringEnabled;
+            steeringRange.Enabled = steeringEnabled;
+            steeringSmooth.Enabled = steeringEnabled;
+            gripClutch.Enabled = steeringEnabled;
+            invertSteering.Enabled = steeringEnabled;
 
             string state = !s.Connected ? "waiting" : s.GamepadPaused ? "paused" : "connected";
-            string text = $"QuestPad — {state} — {s.OutputBackend} — L {BatteryText(s.LeftBattery)} R {BatteryText(s.RightBattery)}";
+            string text = $"QuestPad — {state} — {s.OutputBackend} — {s.QuestViewStatus} — L {BatteryText(s.LeftBattery)} R {BatteryText(s.RightBattery)}";
             _icon.Text = text.Length <= 127 ? text : text[..127];
         };
         timer.Start();
