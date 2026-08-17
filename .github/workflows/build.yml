@@ -51,7 +51,9 @@ jobs:
         shell: pwsh
         run: |
           Push-Location dist/package
-          & .\QuestPad.Host.Console.exe --help | Out-Null
+          # Touch one persistent setting before --help so RuntimeSettings is
+          # intentionally initialized; a pure --help path need not construct it.
+          & .\QuestPad.Host.Console.exe --quest-view black --help | Out-Null
           if (!(Test-Path .\QuestPad.settings.json)) {
             throw "QuestPad.settings.json was not created next to the executable"
           }
