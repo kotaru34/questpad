@@ -1,6 +1,6 @@
 # QuestPad
 
-**Use Meta Quest Touch Plus controllers as a low-latency Windows gamepad — now with experimental native gyro and steering-wheel modes.**
+**Use Meta Quest Touch Plus controllers as a low-latency Windows gamepad — with experimental native gyro and steering-wheel modes.**
 
 QuestPad turns a Meta Quest 3 / Quest 3S into a lightweight controller bridge. A minimal native OpenXR application reads Touch Plus controls and forwards them over USB/ADB to a Windows host. The host can expose either a virtual Xbox 360/XInput controller or an experimental virtual DualShock 4 with native motion fields.
 
@@ -11,11 +11,11 @@ The project is designed around low latency, low Quest-side thermal load, and kee
 - Native Quest OpenXR app — no Unity runtime.
 - Xbox 360/XInput output through ViGEmBus for maximum compatibility.
 - Experimental DualShock 4 backend with native gyro reports.
-- Two right-Touch gyro acquisition modes for A/B testing:
-  - **Camera-assisted tracked pose** — requires optical positional tracking and derives angular rate from tracked orientation.
-  - **Angular-rate only** — QuestPad consumes only OpenXR angular velocity; Windows does not consume optical pose data.
+- **Angular-rate-only right-Touch gyro is the recommended motion path** after real A/B testing.
+- Camera-assisted tracked-pose gyro remains available as an experimental comparison mode.
 - Optional Windows-side adaptive gyro smoothing: Off / Light / Medium / Strong.
 - Experimental two-controller steering-wheel modes: Mounted, Free-air, and Hybrid.
+- Steering is fail-safe: invalid tracking/geometry outputs neutral steering and persistent faults disarm the wheel.
 - ~72 Hz Quest sampling and USB/ADB transport with `TCP_NODELAY`.
 - No scene rendering and zero submitted composition layers.
 - Motion queries are **off when no motion feature requests them**.
@@ -42,7 +42,7 @@ The project is designed around low latency, low Quest-side thermal load, and kee
 - ADB available (`adb.exe`).
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus) installed for the current Xbox 360 and DualShock 4 virtual-controller backends.
 
-> ViGEmBus is archived upstream. QuestPad now keeps raw input, motion processing, logical controller state, and output backends separated so a future backend can replace it without redesigning the Quest transport.
+> ViGEmBus is archived upstream. QuestPad keeps raw input, motion processing, logical controller state, and output backends separated so a future backend can replace it without redesigning the Quest transport.
 
 ## Quick start
 
@@ -99,31 +99,33 @@ Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` are the grip squeezes, not
 
 See [MAPPING.md](MAPPING.md) for modifier details.
 
-## Native gyro experiment
+## Native gyro
 
 Native gyro requires the **DualShock 4** output backend. Selecting either gyro source in the tray automatically switches to DS4. Selecting Xbox again turns gyro off.
 
 Only the **right Touch Plus controller** is used for aiming motion.
 
-### A — Camera-assisted tracked pose
+### Recommended — Angular-rate only
 
 Tray path:
 
-`Gyro source (right Touch) -> Camera-assisted tracked pose`
+`Gyro source (right Touch) -> Angular-rate only (recommended)`
 
-QuestPad requests the right controller tracked pose. The Windows processor requires `POSITION_TRACKED=1`, then derives angular rate from successive tracked orientation samples. If the controller leaves the Quest cameras, the tray reports that this source is waiting for optical tracking instead of silently reusing stale motion.
+QuestPad requests the controller angular-velocity path and sends that controller-local rate to Windows. The Windows host does not consume absolute controller orientation or position for gyro aiming.
 
-This mode exists primarily as an A/B reference for accuracy and thermal testing.
+On the development Quest this path was subjectively better for aiming than the camera-assisted derivative path, so it is now the recommended mode.
 
-### B — Angular-rate only
+**Important:** this is not raw physical MEMS access. Public OpenXR does not expose Touch Plus raw gyroscope samples. Horizon can still perform internal tracking/sensor fusion; QuestPad simply avoids requesting/using optical pose data for gyro aiming in this mode.
+
+### Experimental A/B — Camera-assisted tracked pose
 
 Tray path:
 
-`Gyro source (right Touch) -> Angular-rate only (no optical data consumed)`
+`Gyro source (right Touch) -> Camera-assisted tracked pose (experimental A/B)`
 
-QuestPad requests only the controller angular-velocity path and sends that controller-local rate to Windows. The Windows host does not consume absolute controller orientation or position for gyro aiming.
+QuestPad requests the right controller tracked pose. The Windows processor requires `POSITION_TRACKED=1`, then derives angular rate from successive tracked orientation samples. If the controller leaves the Quest cameras, this source becomes invalid instead of silently reusing stale motion.
 
-**Important:** this is not raw physical MEMS access. Public OpenXR does not expose Touch Plus raw gyroscope samples. Horizon can still perform internal tracking/sensor fusion; QuestPad simply avoids requesting/using optical pose data in this mode.
+Real A/B use on the development Quest found this mode less useful than Angular-rate-only. It remains available for diagnostics, accuracy/thermal comparison, and future runtime testing rather than as the recommended gameplay path.
 
 ### Horizon initialization quirk
 
@@ -135,41 +137,62 @@ This behaviour is runtime-dependent and is documented rather than hidden.
 
 The tray exposes:
 
-- Off — default; game receives the least processed QuestPad signal.
+- Off — least QuestPad-side processing.
 - Light
 - Medium
 - Strong
 
-Filtering is performed on Windows with an adaptive One Euro-style filter, so it adds no Quest-side tracking workload. It is intended as an optional tremor/jitter aid. If a game already provides good native gyro steadiness/smoothing, leave QuestPad smoothing **Off** to avoid double filtering.
+Filtering is performed on Windows with an adaptive One Euro-style filter, so it adds no Quest-side tracking workload. Real aiming tests found it useful for hand tremor/jitter. If a game already provides good native gyro steadiness/smoothing, leaving QuestPad smoothing Off avoids double filtering.
 
-The DS4 gyro scale and axis signs are currently experimental and require real-game validation. Do not treat v0.3 motion calibration as final until it has been tested in multiple native-gyro games.
+The DS4 gyro path still needs broader native-motion game validation before axis/scale calibration is considered final.
 
-## Steering-wheel modes
+## Steering-wheel modes — experimental
 
-Steering is experimental and currently outputs through the selected **gamepad backend** by replacing only **Left Stick X**. Buttons, triggers, grips, right stick, modifier controls and haptics remain available.
+Steering currently outputs through the selected **gamepad backend** by replacing only **Left Stick X**. Buttons, triggers, grips, right stick, modifier controls and haptics remain available.
 
-A future native HID wheel backend is deliberately left as a separate output layer; the current estimator does not depend on ViGEm/XInput internally.
+This gamepad-axis output is useful for development and arcade/controller-compatible games, but it is **not considered the final release-quality steering backend**. A future native HID wheel backend is deliberately left as a separate output layer; the current estimator does not depend on ViGEm/XInput internally.
+
+### Safety/arming model
+
+Steering is no longer allowed to keep a stale non-zero wheel value after tracking or physical-geometry problems.
+
+1. Select a steering mode.
+2. Put the wheel/hands at physical center.
+3. Click **Center + arm steering**.
+4. Make the first deliberate learning turn **to the right**. That establishes a deterministic positive wheel-axis direction.
+5. If a particular fixture is still reversed, use **Invert steering direction**.
+
+While steering mode is enabled, horizontal steering is owned by the wheel estimator. If steering is invalid, disarmed, or the optional clutch is open, QuestPad explicitly sends **LX = 0** instead of keeping stale steering or falling back to a possibly non-zero physical LX.
+
+A tracking/source fault immediately enters a neutral safety hold. If it persists for more than 250 ms, steering becomes **DISARMED** and stays neutral until the user uses `Center + arm steering` again. Large rigid-wheel geometry changes can disarm immediately.
+
+There is also a **Disarm steering now** tray command.
+
+### Optional light-grip clutch
+
+`Steering light-grip clutch (recommended)` requires both controller grip analog values to be lightly engaged before steering is emitted. Releasing either hand forces LX to zero without changing the rest of the gamepad.
+
+The clutch threshold is intentionally low (`~0.12` grip) and below the normal LB/RB shoulder press threshold, so a light hold can enable steering without requiring a full bumper-producing squeeze.
+
+The clutch is optional because fixtures and hand positions differ.
 
 ### Mounted / rigid wheel
 
 Intended for two Touch Plus controllers attached to a rigid ring, plate, cardboard wheel or 3D-printed frame.
 
-1. Put the wheel at physical center.
-2. Select `Steering wheel mode -> Mounted / rigid wheel`.
-3. Click **Calibrate steering center**.
-4. Turn a little left and right so QuestPad can learn the actual rotation axis of that particular mounting.
+Mounted mode uses both controller orientations as redundant measurements of one rigid body. Calibration records each controller's arbitrary mounting orientation and their relative geometry. Small/medium disagreements can suppress the controller that behaves like an outlier; large relative-orientation changes disarm the wheel because the calibrated physical configuration is no longer trustworthy.
 
-Mounted mode uses both controller orientations as the primary rigid-body signal. It compares their relative orientation to the calibrated relationship, rejects large tracking/mounting spikes, applies optional adaptive smoothing, and does not use untracked XYZ positions.
+When both controllers are optically tracked, a large change in their calibrated physical spacing also disarms Mounted/Hybrid steering. This helps detect a controller being removed from the wheel even if its orientation happened to remain plausible.
 
 ### Free-air optical wheel
 
-This mode uses the line between the two controller positions as an imaginary steering wheel. It requires **both controllers to have `POSITION_TRACKED=1`**. If either loses optical tracking, free-air geometry is considered unavailable.
+This mode uses the line between the two controller positions as an imaginary steering wheel. It requires **both controllers to have `POSITION_TRACKED=1`**. If either loses optical tracking, output immediately goes neutral; a persistent loss disarms steering.
 
 This makes it possible to place the Quest off-head — for example in front of the user or near a monitor — and use its cameras as a stationary Touch Plus tracker, provided Horizon keeps the XR session focused and can see the controllers.
 
 ### Hybrid
 
-Hybrid uses optical two-hand geometry while both controllers are position-tracked and falls back to the mounted/orientation estimator when optical tracking disappears.
+Hybrid uses optical two-hand geometry while both controllers are position-tracked and falls back to rigid/orientation steering when optical tracking disappears. It keeps the rigid-wheel geometry safety checks because Hybrid is intended as an optical-assisted mounted wheel rather than unrestricted free-air hand motion.
 
 ### Tracking safety
 
@@ -177,9 +200,9 @@ Quest/OpenXR may return `POSITION_VALID=1` even after `POSITION_TRACKED` becomes
 
 > **XYZ position is consumed only while `POSITION_TRACKED=1`; otherwise it is ignored completely.**
 
-Brief tracking dropouts hold the last reliable wheel value instead of automatically centering the car. If the estimator remains unavailable, the physical left stick becomes the fallback steering input.
+Steering range defaults to **240° total lock-to-lock** and the tray offers 180°, 240° and 360° presets. The CLI accepts 60..1080°.
 
-Steering range defaults to **240° total lock-to-lock** and the tray currently offers 180°, 240° and 360° presets. The CLI accepts 60..1080°.
+Steering smoothing is independent from gyro smoothing and is also performed on Windows.
 
 ## Thermal / display design
 
@@ -198,24 +221,27 @@ That last point makes `Gyro Off + Steering Off` the thermal baseline for compari
 For meaningful A/B testing, compare similar-length sessions with:
 
 1. motion Off;
-2. Camera-assisted gyro;
-3. Angular-rate-only gyro;
+2. Angular-rate-only gyro;
+3. Camera-assisted gyro;
 4. optionally steering with both controllers tracked.
 
-Watch the tray thermal field and practical headset temperature/battery behaviour. The motion modes have not yet completed long thermal-soak validation.
+The host also displays the Quest battery-temperature reading obtained through a slow ADB battery query, which is useful as a finer A/B trend alongside Android's coarse thermal-state field.
 
 ## Windows tray
 
-`QuestPad.Host.exe` runs without a console window. The tray now exposes:
+`QuestPad.Host.exe` runs without a console window. The tray exposes:
 
 - Quest connection and gamepad state;
 - active Xbox/DS4 output backend;
 - gyro source and validity;
 - gyro smoothing;
-- steering mode and estimator state;
-- steering calibration/range;
+- experimental steering mode and estimator state;
+- steering range and smoothing;
+- Center + arm / immediate disarm;
+- optional light-grip clutch;
+- steering-direction inversion;
 - left/right controller battery and source;
-- Quest thermal state;
+- Android thermal state and Quest battery temperature;
 - live input rate/drop count;
 - Pause gamepad output;
 - Exit QuestPad Host.
@@ -228,11 +254,14 @@ Watch the tray thermal field and practical headset temperature/battery behaviour
 --adb PATH
 --serial SERIAL
 --output xbox|ds4
---gyro off|camera|rate
+--gyro off|rate|camera
 --gyro-smoothing off|light|medium|strong
 --steering off|mounted|freeair|hybrid
 --steering-range DEG
 --steering-smoothing off|light|medium|strong
+--steering-clutch on|off
+--steering-invert on|off
+--steering-arm
 --no-gamepad
 --no-adb
 --no-tray
@@ -242,14 +271,14 @@ Watch the tray thermal field and practical headset temperature/battery behaviour
 Examples:
 
 ```powershell
-# Camera-assisted native gyro
-.\QuestPad.Host.Console.exe --output ds4 --gyro camera
-
-# Angular-rate-only native gyro with light tremor filtering
+# Recommended native gyro with light tremor filtering
 .\QuestPad.Host.Console.exe --gyro rate --gyro-smoothing light
 
-# Mounted wheel, 240 degrees lock-to-lock
-.\QuestPad.Host.Console.exe --steering mounted --steering-range 240
+# Experimental camera-assisted A/B gyro
+.\QuestPad.Host.Console.exe --output ds4 --gyro camera
+
+# Mounted wheel; first received frame becomes center, then turn RIGHT first
+.\QuestPad.Host.Console.exe --steering mounted --steering-range 240 --steering-clutch on --steering-arm
 ```
 
 ## Rumble
@@ -275,6 +304,7 @@ The fallback is isolated from the real-time input loop and polls slowly, so it d
 - Tray pause -> neutral output and rumble off while transport stays alive.
 - Motion validity is explicit; stale gyro is never repeated as a valid sample.
 - Optical steering position requires `POSITION_TRACKED=1`.
+- Steering faults immediately produce LX=0; persistent faults require explicit re-centering/re-arming.
 - Quest server remains loopback-only and is reached through ADB forwarding.
 
 During development, Quest Guardian/boundary behaviour was observed to interfere with some deliberately off-head/out-of-boundary placement tests. That is separate from controller tracking itself. QuestPad does not depend on boundary data and does not attempt to alter the user's safety configuration.
@@ -294,7 +324,7 @@ Windows logical processing
   - SteeringEstimator
         |
         v
-LogicalGamepadState / motion state
+Logical gamepad / motion / steering state
         |
         +--> Xbox360Backend
         +--> DualShock4Backend
@@ -338,14 +368,16 @@ The separate `motionprobe/` application remains in the repository for low-level 
 
 The stable Xbox path has been hardware-tested on Quest 3 with ~71.9 Hz transport, reconnect/watchdog behaviour, real-game XInput control, Touch Plus rumble, and ADB battery telemetry.
 
-Tracking probes have additionally confirmed on the development Quest that:
+Tracking/motion testing has additionally confirmed on the development Quest that:
 
 - controller angular velocity remains valid outside camera FOV after initial acquisition;
 - optical `POSITION_TRACKED` can disappear while orientation/angular velocity remain tracked;
 - off-head Quest placement can still provide optical controller tracking when controllers are visible;
+- both integrated gyro modes function, with Angular-rate-only subjectively preferred over Camera-assisted;
+- adaptive gyro smoothing is useful for real hand tremor during micro-aim;
 - Android thermal status remained `NONE` in the observed probe runs.
 
-**The integrated v0.3 DS4 gyro and steering backends are experimental and require real-game/hardware validation before they should be called stable.** In particular, DS4 gyro scale/axis calibration, game compatibility, wheel feel, and long thermal A/B runs are the next validation targets.
+**Steering remains experimental and is intentionally not considered release-ready yet.** Its tracking concept works, but real use exposed unsafe behaviour when the wheel/controllers were removed or put down. The current safety patch changes that failure mode to immediate neutral output plus explicit disarm/re-arm; this patch now needs hardware re-validation before steering should be promoted.
 
 See [BUILD_STATUS.md](BUILD_STATUS.md), [MAPPING.md](MAPPING.md), and [PROTOCOL.md](PROTOCOL.md).
 
