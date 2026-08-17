@@ -453,7 +453,7 @@ internal static class Program
                                     : 0.0f;
                             }
 
-                            backend.Apply(state, motion);
+                            backend.Apply(state, motion, AggregateControllerBattery(Status.Snapshot()));
                         }
                     }
 
@@ -683,6 +683,15 @@ internal static class Program
         0 => "NONE", 1 => "LIGHT", 2 => "MODERATE", 3 => "SEVERE",
         4 => "CRITICAL", 5 => "EMERGENCY", 6 => "SHUTDOWN", _ => t.ToString()
     };
+
+    private static int AggregateControllerBattery(HostSnapshot snapshot)
+    {
+        if (snapshot.LeftBattery.HasValue && snapshot.RightBattery.HasValue)
+            return Math.Min(snapshot.LeftBattery.Value, snapshot.RightBattery.Value);
+        if (snapshot.LeftBattery.HasValue) return snapshot.LeftBattery.Value;
+        if (snapshot.RightBattery.HasValue) return snapshot.RightBattery.Value;
+        return 100;
+    }
 
     private static (int? left, int? right) DecodeBatteries(uint packed)
     {

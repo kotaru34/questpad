@@ -9,7 +9,7 @@ internal interface IOutputBackend : IDisposable
 {
     OutputMode Mode { get; }
     string Name { get; }
-    void Apply(LogicalGamepadState state, ProcessedMotion motion);
+    void Apply(LogicalGamepadState state, ProcessedMotion motion, int? batteryPercent);
     void Neutral();
 }
 
@@ -74,8 +74,12 @@ internal sealed class Xbox360Backend : IOutputBackend
     public OutputMode Mode => OutputMode.Xbox360;
     public string Name => "Xbox 360 / XInput";
 
-    public void Apply(LogicalGamepadState s, ProcessedMotion motion)
+    public void Apply(LogicalGamepadState s, ProcessedMotion motion, int? batteryPercent)
     {
+        // ViGEm emulates an Xbox 360 *wired* endpoint. XInput therefore has no
+        // feeder-side battery field to populate; keep the parameter only so all
+        // backends share one interface.
+        _ = batteryPercent;
         pad.ResetReport();
         pad.SetAxisValue(Xbox360Axis.LeftThumbX, ToShort(s.LX));
         pad.SetAxisValue(Xbox360Axis.LeftThumbY, ToShort(s.LY));
@@ -132,6 +136,7 @@ internal sealed class DualShock4Backend : IOutputBackend
 {
     private readonly IDualShock4Controller pad;
     private ushort timestamp;
+    private int lastBatteryPercent = 100;
 
     // A physical DS4 exposes calibrated sensor data through its HID feature report.
     // ViGEm emulates that device-side calibration while DS4_REPORT_EX carries the
@@ -153,9 +158,12 @@ internal sealed class DualShock4Backend : IOutputBackend
     public OutputMode Mode => OutputMode.DualShock4;
     public string Name => "DualShock 4 / native motion";
 
-    public void Apply(LogicalGamepadState s, ProcessedMotion motion)
+    public void Apply(LogicalGamepadState s, ProcessedMotion motion, int? batteryPercent)
     {
-        byte[] report = BuildBaseReport(s);
+        if (batteryPercent.HasValue)
+            lastBatteryPercent = Math.Clamp(batteryPercent.Value, 0, 100);
+
+        byte[] report = BuildBaseReport(s, lastBatteryPercent);
         timestamp++;
         BinaryPrimitives.WriteUInt16LittleEndian(report.AsSpan(9, 2), timestamp);
 
@@ -180,7 +188,7 @@ internal sealed class DualShock4Backend : IOutputBackend
 
     public void Neutral()
     {
-        pad.SubmitRawReport(BuildBaseReport(LogicalGamepadState.Neutral()));
+        pad.SubmitRawReport(BuildBaseReport(LogicalGamepadState.Neutral(), lastBatteryPercent));
     }
 
     public void Dispose()
@@ -189,7 +197,7 @@ internal sealed class DualShock4Backend : IOutputBackend
         pad.Dispose();
     }
 
-    private static byte[] BuildBaseReport(LogicalGamepadState s)
+    private static byte[] BuildBaseReport(LogicalGamepadState s, int batteryPercent)
     {
         byte[] r = new byte[63];
         r[0] = ToDs4Axis(s.LX);
@@ -215,6 +223,15 @@ internal sealed class DualShock4Backend : IOutputBackend
         r[6] = s.Guide ? (byte)0x01 : (byte)0x00; // PS
         r[7] = ToByte01(s.LT);
         r[8] = ToByte01(s.RT);
+
+        // DS4 USB input report byte 30 (29 in ViGEm's 63-byte buffer because
+        // Report ID 0x01 is omitted) is status[0]. Bits 0..3 encode battery
+        // capacity and bit 4 is cable/charging state. Quest Touch controllers
+        // are battery-powered, so keep cable=0 and expose the weakest controller
+        // as the virtual pad's single battery. Real DS4 firmware reports coarse
+        // 10%-wide bins; level 0 is commonly presented as ~5%, which explains
+        // Steam's previous constant 5% warning when this byte was left at zero.
+        r[29] = ToDs4BatteryLevel(batteryPercent);
         return r;
     }
 
@@ -229,6 +246,12 @@ internal sealed class DualShock4Backend : IOutputBackend
         if (s.DpadDown) return 4;
         if (s.DpadLeft) return 6;
         return 8;
+    }
+
+    private static byte ToDs4BatteryLevel(int batteryPercent)
+    {
+        int percent = Math.Clamp(batteryPercent, 0, 100);
+        return (byte)(percent >= 100 ? 10 : percent / 10);
     }
 
     private static short GyroRaw(float degreesPerSecond)
