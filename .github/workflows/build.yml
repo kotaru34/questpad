@@ -2,7 +2,7 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, agent/session-polish ]
 
 jobs:
   quest-apk:
@@ -37,6 +37,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Mapper regression smoke test
+        run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
       - name: Publish tray host
         run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
       - name: Publish console host
