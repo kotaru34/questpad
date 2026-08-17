@@ -47,6 +47,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/package | Out-Null
           Copy-Item dist/tray/QuestPad.Host.exe dist/package/QuestPad.Host.exe
           Copy-Item dist/console/QuestPad.Host.Console.exe dist/package/QuestPad.Host.Console.exe
+      - name: Smoke-test portable settings
+        shell: pwsh
+        run: |
+          Push-Location dist/package
+          & .\QuestPad.Host.Console.exe --help | Out-Null
+          if (!(Test-Path .\QuestPad.settings.json)) {
+            throw "QuestPad.settings.json was not created next to the executable"
+          }
+          $settings = Get-Content .\QuestPad.settings.json -Raw | ConvertFrom-Json
+          if ($settings.Output -ne 'Xbox360' -or $settings.GyroSource -ne 'Off') {
+            throw "Portable settings file did not contain the expected defaults"
+          }
+          Pop-Location
       - uses: actions/upload-artifact@v4
         with:
           name: QuestPad-Host-win-x64
