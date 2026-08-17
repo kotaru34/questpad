@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace QuestPad.Host;
 
@@ -53,8 +55,18 @@ internal readonly record struct RuntimeSettingsSnapshot(
 
 internal sealed class RuntimeSettings
 {
+    private const string SettingsFileName = "QuestPad.settings.json";
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
     private readonly object gate = new();
-    private RuntimeSettingsSnapshot value = new(
+    private readonly string settingsPath;
+    private RuntimeSettingsSnapshot value = Defaults;
+
+    private static RuntimeSettingsSnapshot Defaults => new(
         OutputMode.Xbox360,
         GyroSourceMode.Off,
         SmoothingLevel.Off,
@@ -65,6 +77,31 @@ internal sealed class RuntimeSettings
         240.0f,
         false,
         false);
+
+    public RuntimeSettings()
+    {
+        string baseDirectory = Path.GetDirectoryName(Environment.ProcessPath ?? string.Empty) ?? AppContext.BaseDirectory;
+        settingsPath = Path.Combine(baseDirectory, SettingsFileName);
+
+        if (File.Exists(settingsPath))
+        {
+            try
+            {
+                RuntimeSettingsSnapshot loaded = JsonSerializer.Deserialize<RuntimeSettingsSnapshot>(
+                    File.ReadAllText(settingsPath), JsonOptions);
+                value = Normalize(loaded);
+            }
+            catch (Exception ex)
+            {
+                value = Defaults;
+                Console.Error.WriteLine($"Could not read {SettingsFileName}; using defaults: {ex.Message}");
+            }
+        }
+        else
+        {
+            SaveLocked();
+        }
+    }
 
     public RuntimeSettingsSnapshot Snapshot()
     {
@@ -83,6 +120,7 @@ internal sealed class RuntimeSettings
                 Output = output,
                 GyroSource = output == OutputMode.Xbox360 ? GyroSourceMode.Off : value.GyroSource
             };
+            SaveLocked();
         }
     }
 
@@ -95,47 +133,125 @@ internal sealed class RuntimeSettings
                 GyroSource = source,
                 Output = source == GyroSourceMode.Off ? value.Output : OutputMode.DualShock4
             };
+            SaveLocked();
         }
     }
 
     public void SetGyroSmoothing(SmoothingLevel smoothing)
     {
-        lock (gate) value = value with { GyroSmoothing = smoothing };
+        lock (gate)
+        {
+            value = value with { GyroSmoothing = smoothing };
+            SaveLocked();
+        }
     }
 
     public void SetGyroStickLock(bool enabled)
     {
-        lock (gate) value = value with { GyroStickLock = enabled };
+        lock (gate)
+        {
+            value = value with { GyroStickLock = enabled };
+            SaveLocked();
+        }
     }
 
     public void SetQuestView(QuestViewMode view)
     {
-        lock (gate) value = value with { QuestView = view };
+        lock (gate)
+        {
+            value = value with { QuestView = view };
+            SaveLocked();
+        }
     }
 
     public void SetSteering(SteeringMode steering)
     {
-        lock (gate) value = value with { Steering = steering };
+        lock (gate)
+        {
+            value = value with { Steering = steering };
+            SaveLocked();
+        }
     }
 
     public void SetSteeringSmoothing(SmoothingLevel smoothing)
     {
-        lock (gate) value = value with { SteeringSmoothing = smoothing };
+        lock (gate)
+        {
+            value = value with { SteeringSmoothing = smoothing };
+            SaveLocked();
+        }
     }
 
     public void SetSteeringRange(float totalDegrees)
     {
-        lock (gate) value = value with { SteeringRangeDegrees = Math.Clamp(totalDegrees, 60.0f, 1080.0f) };
+        lock (gate)
+        {
+            value = value with { SteeringRangeDegrees = Math.Clamp(totalDegrees, 60.0f, 1080.0f) };
+            SaveLocked();
+        }
     }
 
     public void SetSteeringGripClutch(bool enabled)
     {
-        lock (gate) value = value with { SteeringGripClutch = enabled };
+        lock (gate)
+        {
+            value = value with { SteeringGripClutch = enabled };
+            SaveLocked();
+        }
     }
 
     public void SetSteeringInverted(bool enabled)
     {
-        lock (gate) value = value with { SteeringInverted = enabled };
+        lock (gate)
+        {
+            value = value with { SteeringInverted = enabled };
+            SaveLocked();
+        }
+    }
+
+    private static RuntimeSettingsSnapshot Normalize(RuntimeSettingsSnapshot loaded)
+    {
+        RuntimeSettingsSnapshot defaults = Defaults;
+        OutputMode output = Enum.IsDefined(loaded.Output) ? loaded.Output : defaults.Output;
+        GyroSourceMode gyro = Enum.IsDefined(loaded.GyroSource) ? loaded.GyroSource : defaults.GyroSource;
+        SmoothingLevel gyroSmoothing = Enum.IsDefined(loaded.GyroSmoothing) ? loaded.GyroSmoothing : defaults.GyroSmoothing;
+        QuestViewMode questView = Enum.IsDefined(loaded.QuestView) ? loaded.QuestView : defaults.QuestView;
+        SteeringMode steering = Enum.IsDefined(loaded.Steering) ? loaded.Steering : defaults.Steering;
+        SmoothingLevel steeringSmoothing = Enum.IsDefined(loaded.SteeringSmoothing) ? loaded.SteeringSmoothing : defaults.SteeringSmoothing;
+        float steeringRange = float.IsFinite(loaded.SteeringRangeDegrees)
+            ? Math.Clamp(loaded.SteeringRangeDegrees, 60.0f, 1080.0f)
+            : defaults.SteeringRangeDegrees;
+
+        if (gyro != GyroSourceMode.Off)
+            output = OutputMode.DualShock4;
+
+        return new RuntimeSettingsSnapshot(
+            output,
+            gyro,
+            gyroSmoothing,
+            loaded.GyroStickLock,
+            questView,
+            steering,
+            steeringSmoothing,
+            steeringRange,
+            loaded.SteeringGripClutch,
+            loaded.SteeringInverted);
+    }
+
+    private void SaveLocked()
+    {
+        string tempPath = settingsPath + ".tmp";
+        try
+        {
+            string json = JsonSerializer.Serialize(value, JsonOptions);
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, settingsPath, true);
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            Console.Error.WriteLine($"Could not save {SettingsFileName}: {ex.Message}");
+        }
     }
 }
 
