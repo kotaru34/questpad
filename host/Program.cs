@@ -36,6 +36,7 @@ internal static class Program
         bool noAdb = false;
         bool noTray = false;
         bool autoStartQuest = true;
+        bool questBrightnessControl = true;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -52,6 +53,12 @@ internal static class Program
                     break;
                 case "--no-quest-autostart":
                     autoStartQuest = false;
+                    break;
+                case "--quest-brightness" when i + 1 < args.Length:
+                    questBrightnessControl = ParseOnOff(args[++i]);
+                    break;
+                case "--no-quest-brightness":
+                    questBrightnessControl = false;
                     break;
                 case "--output" when i + 1 < args.Length:
                     Settings.SetOutput(ParseOutput(args[++i]));
@@ -165,6 +172,11 @@ internal static class Program
             }
         }
 
+        AdbQuestBrightnessManager? brightnessManager =
+            adb is not null && serial is not null && questBrightnessControl
+                ? new AdbQuestBrightnessManager(adb, serial, Settings, Cancel.Token)
+                : null;
+
         AdbControllerBatteryPoller? batteryPoller = adb is null
             ? null
             : new AdbControllerBatteryPoller(adb, serial, Status, Cancel.Token);
@@ -197,6 +209,8 @@ internal static class Program
         }
         finally
         {
+            if (brightnessManager is not null)
+                await brightnessManager.DisposeAsync();
             if (batteryPoller is not null)
                 await batteryPoller.DisposeAsync();
             outputs?.Dispose();
@@ -289,12 +303,6 @@ internal static class Program
                         Console.WriteLine("\nSteering center/geometry captured. Turn RIGHT briefly first so QuestPad can learn a deterministic positive wheel axis.");
                     }
 
-                    // Host-side gyro stick lock is intentionally independent of the
-                    // Quest motion request. Horizon keeps streaming angular-rate data
-                    // while locked, so the next unlocked packet can resume immediately.
-                    // Feeding GyroSource=Off into MotionProcessor during lock also resets
-                    // its smoothing state and prevents hidden motion from causing an
-                    // unlock kick.
                     gyroStickLocked = UpdateGyroStickLock(gyroStickLocked, cfg, p.RX, p.RY);
                     RuntimeSettingsSnapshot motionCfg = gyroStickLocked
                         ? cfg with { GyroSource = GyroSourceMode.Off }
@@ -344,10 +352,6 @@ internal static class Program
                             LogicalGamepadState state = mapper.Map(
                                 p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
 
-                            // The single retained mounted-steering experiment owns LX
-                            // completely while enabled. Invalid/disarmed/clutch-open
-                            // states are explicitly neutral so desktop gamepad-to-mouse
-                            // layers can never inherit a stale steering value.
                             if (cfg.Steering != SteeringMode.Off)
                             {
                                 state.LX = motion.SteeringValid && steeringClutchEngaged
@@ -611,6 +615,8 @@ internal static class Program
             "  --serial SERIAL            select and validate a specific Quest ADB device\n" +
             "  --quest-autostart on|off   auto-start the Quest APK after USB detection (default on)\n" +
             "  --no-quest-autostart       do not launch the Quest APK automatically\n" +
+            "  --quest-brightness on|off  Black-mode system brightness control over ADB (default on)\n" +
+            "  --no-quest-brightness      leave Quest system brightness unchanged\n" +
             "  --quest-view black|passthrough\n" +
             "  --passthrough              alias for --quest-view passthrough\n" +
             "  --output xbox|ds4          virtual controller backend\n" +
@@ -629,6 +635,8 @@ internal static class Program
             "Without --serial, QuestPad enumerates ADB devices and selects only a Meta Quest capability match.\n" +
             "A connected phone is never used as the transport target; multiple matching headsets require --serial.\n" +
             "Quest view 'black' is the zero-composition-layer low-workload PC-only mode.\n" +
+            "In Black mode the Windows host snapshots Quest system brightness/mode, forces minimum brightness,\n" +
+            "and restores the saved values on passthrough or exit. A portable recovery file survives host crashes.\n" +
             "Quest view 'passthrough' requests the optional compositor passthrough layer for MR use.\n" +
             "Gyro 'rate' is the recommended path and consumes controller-local OpenXR angular velocity.\n" +
             "Gyro 'camera' is a diagnostic A/B reference that derives rate from tracked pose and requires PT=1.\n" +
