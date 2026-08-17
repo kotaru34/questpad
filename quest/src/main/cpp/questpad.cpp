@@ -617,14 +617,35 @@ void locateTracked(
 
 void locateAngularOnly(XrSpace controllerSpace, XrSpace localSpace, XrTime time, bool active, bool left, MotionOutput& out) {
     const uint32_t activeBit = left ? MOTION_LEFT_ACTIVE : MOTION_RIGHT_ACTIVE;
+    const uint32_t ovBit = left ? MOTION_LEFT_OV : MOTION_RIGHT_OV;
+    const uint32_t otBit = left ? MOTION_LEFT_OT : MOTION_RIGHT_OT;
     const uint32_t avBit = left ? MOTION_LEFT_AV : MOTION_RIGHT_AV;
     if (!active) return;
     out.flags |= activeBit;
+
+    // Keep the established angular-rate path untouched: locating LOCAL relative to
+    // the controller yields angular velocity in controller-local axes, and negating
+    // it gives controller motion relative to LOCAL. The same locate result also
+    // contains LOCAL-in-controller orientation. Conjugate that quaternion to publish
+    // controller-in-LOCAL through the packet's existing orientation fields. This adds
+    // no second xrLocateSpace call and does not involve positional tracking.
     XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
     XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
     location.next = &velocity;
-    if (XR_SUCCEEDED(xrLocateSpace(localSpace, controllerSpace, time, &location)) &&
-        (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)) {
+    if (XR_FAILED(xrLocateSpace(localSpace, controllerSpace, time, &location))) return;
+
+    if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) {
+        out.flags |= ovBit;
+        out.orientation = {
+            -location.pose.orientation.x,
+            -location.pose.orientation.y,
+            -location.pose.orientation.z,
+             location.pose.orientation.w};
+    }
+    if (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)
+        out.flags |= otBit;
+
+    if (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
         out.flags |= avBit;
         out.angularLocal = {-velocity.angularVelocity.x, -velocity.angularVelocity.y, -velocity.angularVelocity.z};
     }
@@ -664,7 +685,7 @@ void android_main(android_app* app) {
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
-    ici.applicationInfo.applicationVersion = 6;
+    ici.applicationInfo.applicationVersion = 7;
     std::strncpy(ici.applicationInfo.engineName, "QuestPadNative", XR_MAX_ENGINE_NAME_SIZE - 1);
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
@@ -897,6 +918,7 @@ void android_main(android_app* app) {
                 MotionOutput right{};
                 locateAngularOnly(rightSpace, localSpace, fs.predictedDisplayTime, rPoseActive, false, right);
                 packet.motionFlags |= right.flags;
+                packet.rightOrientation = right.orientation;
                 packet.rightAngularLocal = right.angularLocal;
             } else if (motionRequest == MOTION_REQUEST_RIGHT_TRACKED) {
                 MotionOutput right{};
