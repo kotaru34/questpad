@@ -2,9 +2,8 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main, agent/session-polish ]
+    branches: [ main ]
 
-# Temporary branch trigger for the 0.3.6 session-polish hardware candidate.
 jobs:
   quest-apk:
     runs-on: ubuntu-latest
