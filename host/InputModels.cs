@@ -15,10 +15,18 @@ internal enum GyroSourceMode
     AngularRate
 }
 
+internal enum QuestViewMode
+{
+    Black,
+    Passthrough
+}
+
 internal enum SteeringMode
 {
     Off,
     Mounted,
+    // Kept internally for compatibility with the v0.3 estimator experiments.
+    // The public UI intentionally exposes only Mounted going forward.
     FreeAir,
     Hybrid
 }
@@ -35,6 +43,7 @@ internal readonly record struct RuntimeSettingsSnapshot(
     OutputMode Output,
     GyroSourceMode GyroSource,
     SmoothingLevel GyroSmoothing,
+    QuestViewMode QuestView,
     SteeringMode Steering,
     SmoothingLevel SteeringSmoothing,
     float SteeringRangeDegrees,
@@ -48,6 +57,7 @@ internal sealed class RuntimeSettings
         OutputMode.Xbox360,
         GyroSourceMode.Off,
         SmoothingLevel.Off,
+        QuestViewMode.Black,
         SteeringMode.Off,
         SmoothingLevel.Light,
         240.0f,
@@ -89,6 +99,11 @@ internal sealed class RuntimeSettings
     public void SetGyroSmoothing(SmoothingLevel smoothing)
     {
         lock (gate) value = value with { GyroSmoothing = smoothing };
+    }
+
+    public void SetQuestView(QuestViewMode view)
+    {
+        lock (gate) value = value with { QuestView = view };
     }
 
     public void SetSteering(SteeringMode steering)
@@ -193,22 +208,30 @@ internal readonly record struct ProcessedMotion(
 
 internal static class HostControlBits
 {
-    // QFB1 reserved bits. These are requests from the host; the Quest side never
-    // enables pose queries unless at least one motion feature asks for them.
+    // QFB1 control word. The low two bits retain protocol-v2 motion request values.
+    // Higher bits are orthogonal feature requests so adding passthrough does not alter
+    // packet size or the established motion transport.
+    public const ushort MotionMask = 0x0003;
     public const ushort MotionNone = 0;
     public const ushort MotionRightAngularRate = 1;
     public const ushort MotionRightTracked = 2;
     public const ushort MotionBothTracked = 3;
+    public const ushort QuestPassthrough = 1 << 8;
 
     public static ushort For(RuntimeSettingsSnapshot settings)
     {
-        if (settings.Steering != SteeringMode.Off)
-            return MotionBothTracked;
-        return settings.GyroSource switch
-        {
-            GyroSourceMode.AngularRate => MotionRightAngularRate,
-            GyroSourceMode.CameraAssisted => MotionRightTracked,
-            _ => MotionNone
-        };
+        ushort control = settings.Steering != SteeringMode.Off
+            ? MotionBothTracked
+            : settings.GyroSource switch
+            {
+                GyroSourceMode.AngularRate => MotionRightAngularRate,
+                GyroSourceMode.CameraAssisted => MotionRightTracked,
+                _ => MotionNone
+            };
+
+        if (settings.QuestView == QuestViewMode.Passthrough)
+            control |= QuestPassthrough;
+
+        return control;
     }
 }
