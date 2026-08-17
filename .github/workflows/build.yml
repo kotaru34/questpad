@@ -2,7 +2,7 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main, steering-safety-v031 ]
+    branches: [ main ]
 
 jobs:
   quest-apk:
