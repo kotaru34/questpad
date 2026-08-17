@@ -4,6 +4,7 @@ on:
   push:
     branches: [ main, agent/session-polish ]
 
+# Temporary branch trigger for the 0.3.6 session-polish hardware candidate.
 jobs:
   quest-apk:
     runs-on: ubuntu-latest
