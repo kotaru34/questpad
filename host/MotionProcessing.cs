@@ -41,6 +41,26 @@ internal sealed class MotionProcessor
             previousSteeringMode = settings.Steering;
         }
 
+        // DS4 compatibility accelerometer: OpenXR exposes controller orientation
+        // and angular velocity but no raw Touch Plus accelerometer. A stationary
+        // accelerometer measures specific force opposite gravity, so rotate LOCAL +Y
+        // (1 g) into controller-local axes. This gravity-only path deliberately does
+        // not finite-difference linear velocity, add another pose query, or share any
+        // filter state with the established gyro path.
+        Vector3 accelerationG = Vector3.Zero;
+        bool accelerationValid = false;
+        if (frame.Right.Active && frame.Right.OrientationValid)
+        {
+            Quaternion rawOrientation = frame.Right.Orientation;
+            float orientationNorm = rawOrientation.LengthSquared();
+            if (orientationNorm > 1e-10f && float.IsFinite(orientationNorm))
+            {
+                Quaternion q = Quaternion.Normalize(rawOrientation);
+                accelerationG = Vector3.Transform(Vector3.UnitY, Quaternion.Conjugate(q));
+                accelerationValid = IsFinite(accelerationG);
+            }
+        }
+
         Vector3 gyro = Vector3.Zero;
         bool gyroValid = false;
 
@@ -96,7 +116,14 @@ internal sealed class MotionProcessor
             ? (false, 0.0f, "off")
             : steering.Update(frame, settings);
 
-        return new ProcessedMotion(gyroValid, gyro, steeringValid, steeringValue, steeringState);
+        return new ProcessedMotion(
+            gyroValid,
+            gyro,
+            accelerationValid,
+            accelerationG,
+            steeringValid,
+            steeringValue,
+            steeringState);
     }
 
     private static Vector3 QuaternionDeltaRate(Quaternion previous, Quaternion current, float dt)

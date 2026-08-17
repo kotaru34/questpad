@@ -144,6 +144,7 @@ internal sealed class DualShock4Backend : IOutputBackend
     // DS4 sensor scale closely; keep the conversion isolated here for hardware/game
     // validation and future per-backend calibration without touching Quest transport.
     private const float GyroCountsPerDegreeSecond = 16.0f;
+    private const float AccelCountsPerG = 8192.0f;
 
     public DualShock4Backend(ViGEmClient client, Action<byte, byte> rumble)
     {
@@ -181,8 +182,17 @@ internal sealed class DualShock4Backend : IOutputBackend
             BinaryPrimitives.WriteInt16LittleEndian(report.AsSpan(16, 2), gz);
         }
 
-        // Acceleration remains zero on purpose: QuestPad's native gyro feature only
-        // promises rotation-rate data and does not fabricate an accelerometer.
+        if (motion.AccelerationValid)
+        {
+            // A real DS4 carries signed accelerometer samples at 8192 counts/g.
+            // QuestPad supplies the gravity/specific-force component only, derived
+            // from the right Touch orientation. Translational acceleration is not
+            // fabricated from noisy finite differences.
+            BinaryPrimitives.WriteInt16LittleEndian(report.AsSpan(18, 2), AccelRaw(motion.AccelerationG.X));
+            BinaryPrimitives.WriteInt16LittleEndian(report.AsSpan(20, 2), AccelRaw(motion.AccelerationG.Y));
+            BinaryPrimitives.WriteInt16LittleEndian(report.AsSpan(22, 2), AccelRaw(motion.AccelerationG.Z));
+        }
+
         pad.SubmitRawReport(report);
     }
 
@@ -259,6 +269,12 @@ internal sealed class DualShock4Backend : IOutputBackend
     private static short GyroRaw(float degreesPerSecond)
     {
         double raw = degreesPerSecond * GyroCountsPerDegreeSecond;
+        return (short)Math.Clamp(Math.Round(raw), short.MinValue, short.MaxValue);
+    }
+
+    private static short AccelRaw(float g)
+    {
+        double raw = g * AccelCountsPerG;
         return (short)Math.Clamp(Math.Round(raw), short.MinValue, short.MaxValue);
     }
 
