@@ -305,7 +305,7 @@ Controller battery percentage prefers `XR_EXT_interaction_profile_battery_state_
 
 - OpenXR focus loss -> neutral virtual controller.
 - USB/TCP loss or 250 ms watchdog -> neutral controller and reconnect.
-- Unexpected USB/TCP loss neutralizes the controller and leaves the Windows host alive to reconnect.
+- Unexpected USB/TCP loss neutralizes the controller and leaves the Windows host alive. With normal ADB ownership enabled, the host waits for the **same selected Quest serial**, recreates the lost `tcp:38888` forward when USB/ADB returns, and reconnects automatically. If the QuestPad process was actually killed while disconnected, normal autostart may launch it again; a still-running Quest app is not restarted.
 - Intentional Windows-host exit sends a protocol shutdown request to the Quest bridge, with ADB force-stop only as a lifecycle backstop.
 - Intentional Quest exit-chord completion is explicitly flagged so the Windows host exits too; it is not inferred from transport loss.
 - Tray pause -> neutral controller and rumble off while transport stays alive.

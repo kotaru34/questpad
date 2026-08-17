@@ -112,11 +112,19 @@ The old Free-air and Hybrid prototypes remain internal legacy code for now but a
 
 ## Release polish in the current test branch
 
-Implemented and build-gated, with the new bidirectional lifecycle still awaiting the next Quest 3 hardware pass:
+Hardware-verified on Quest 3:
 
-- Windows Exit / Ctrl+C sends an explicit protocol shutdown request to the Quest app; ADB force-stop is retained only as the final lifecycle backstop.
-- Quest exit-chord completion carries an explicit final status flag that closes the Windows host, while accidental transport loss still reconnects.
-- a named Windows single-instance guard prevents two hosts from fighting over ADB forwarding, ViGEm and brightness ownership;
+- Windows Exit / Ctrl+C sends an explicit protocol shutdown request and closes the Quest app cleanly; ADB force-stop remains only the final lifecycle backstop.
+- Quest exit-chord completion carries an explicit final status flag and closes the Windows host too.
+- The same bidirectional shutdown behaviour works while MR passthrough is active.
+- the named Windows single-instance guard correctly rejects a second host instance without disturbing the active bridge;
+
+New v0.3.7 recovery candidate, build-gated and awaiting the focused unplug/replug hardware retest:
+
+- unexpected USB/ADB loss still neutralizes output and **does not** quit either side;
+- the host now waits for the same selected Quest ADB serial instead of blindly retrying a stale localhost forward;
+- when that Quest returns, the host removes/recreates `tcp:38888` and retries the existing Quest bridge first;
+- the Quest app is relaunched only when autostart is enabled **and** its process is no longer running, avoiding unnecessary OpenXR-session restarts on ordinary cable reconnects.
 - the Windows executables, tray and Quest launcher now share one QuestPad application mark.
 - Quest-side settings UI, user-selectable XR polling frequency and a manual session-restart menu were deliberately **not** added: the Windows tray is already the single control surface, ~72 Hz remains the validated low-load baseline, and normal watchdog/autostart recovery already covers the common restart case.
 

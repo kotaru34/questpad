@@ -147,6 +147,7 @@ internal static class Program
             RequestHostShutdown);
 
         string? adb = null;
+        AdbQuestDevice? questTarget = null;
         if (!noAdb)
         {
             adb = FindAdb(adbOverride);
@@ -163,6 +164,7 @@ internal static class Program
                 return 3;
             }
 
+            questTarget = quest;
             serial = quest.Serial;
             string questName = string.Join(" ", new[] { quest.Manufacturer, quest.Model }.Where(s => !string.IsNullOrWhiteSpace(s)));
             if (string.IsNullOrWhiteSpace(questName)) questName = "Meta Quest";
@@ -220,7 +222,7 @@ internal static class Program
 
         try
         {
-            await ReceiveLoopAsync(outputs, Cancel.Token);
+            await ReceiveLoopAsync(outputs, adb, questTarget, autoStartQuest, Cancel.Token);
         }
         finally
         {
@@ -247,21 +249,75 @@ internal static class Program
         return 0;
     }
 
-    private static async Task ReceiveLoopAsync(OutputBackendManager? outputs, CancellationToken ct)
+    private static async Task ReceiveLoopAsync(
+        OutputBackendManager? outputs,
+        string? adb,
+        AdbQuestDevice? questTarget,
+        bool autoStartQuest,
+        CancellationToken ct)
     {
         var mapper = new ControllerMapper();
         var motionProcessor = new MotionProcessor();
+        bool adbRecoveryNeeded = false;
+        bool adbForwardPrepared = false;
+        bool recoveryLaunchAttempted = false;
+        bool adbWaitLogged = false;
+        bool bridgeWaitLogged = false;
 
         while (!ct.IsCancellationRequested)
         {
+            if (adbRecoveryNeeded && adb is not null && questTarget is not null)
+            {
+                if (!RunAdb(adb, questTarget.Serial, "get-state"))
+                {
+                    if (!adbWaitLogged)
+                    {
+                        Console.WriteLine($"Waiting for Quest USB/ADB device [{questTarget.Serial}] to return...");
+                        adbWaitLogged = true;
+                    }
+                    adbForwardPrepared = false;
+                    recoveryLaunchAttempted = false;
+                    bridgeWaitLogged = false;
+                    try { await Task.Delay(750, ct); }
+                    catch (OperationCanceledException) { break; }
+                    continue;
+                }
+
+                adbWaitLogged = false;
+                if (!adbForwardPrepared)
+                {
+                    RunAdb(adb, questTarget.Serial, "forward", "--remove", $"tcp:{Port}");
+                    if (!RunAdb(adb, questTarget.Serial, "forward", $"tcp:{Port}", $"tcp:{Port}"))
+                    {
+                        Console.WriteLine("Quest ADB is back but the port forward is not ready yet; retrying...");
+                        try { await Task.Delay(750, ct); }
+                        catch (OperationCanceledException) { break; }
+                        continue;
+                    }
+                    adbForwardPrepared = true;
+                    bridgeWaitLogged = false;
+                    Console.WriteLine("Quest USB/ADB restored; tcp:38888 forward recreated.");
+                }
+            }
+
+            bool connectedThisAttempt = false;
             try
             {
                 using var tcp = new TcpClient { NoDelay = true };
                 Status.SetConnection(false);
-                Console.WriteLine("Waiting for QuestPad on Quest...");
+                Console.WriteLine(adbRecoveryNeeded ? "Restoring QuestPad transport..." : "Waiting for QuestPad on Quest...");
                 await tcp.ConnectAsync("127.0.0.1", Port, ct);
+                connectedThisAttempt = true;
+                bool recoveredFromAdbLoss = adbRecoveryNeeded;
+                adbRecoveryNeeded = false;
+                adbForwardPrepared = false;
+                recoveryLaunchAttempted = false;
+                adbWaitLogged = false;
+                bridgeWaitLogged = false;
                 Status.SetConnection(true);
-                Console.WriteLine("QuestPad transport connected (protocol v2 motion/MR-capable)");
+                Console.WriteLine(recoveredFromAdbLoss
+                    ? "QuestPad transport recovered after USB/ADB loss."
+                    : "QuestPad transport connected (protocol v2 motion/MR-capable)");
                 mapper.Reset();
                 motionProcessor.Reset();
                 bool gyroStickLocked = false;
@@ -433,8 +489,47 @@ internal static class Program
                 motionProcessor.Reset();
                 Volatile.Write(ref RumblePacked, 0);
                 try { outputs?.Current?.Neutral(); } catch { }
-                Console.WriteLine($"\ntransport lost/watchdog fired: {ex.Message}; reconnecting...");
-                try { await Task.Delay(500, ct); }
+                if (adb is not null && questTarget is not null)
+                {
+                    if (connectedThisAttempt || !adbRecoveryNeeded)
+                    {
+                        adbRecoveryNeeded = true;
+                        adbForwardPrepared = false;
+                        recoveryLaunchAttempted = false;
+                        adbWaitLogged = false;
+                        bridgeWaitLogged = false;
+                        Console.WriteLine($"\ntransport lost/watchdog fired: {ex.Message}; rebuilding ADB transport for [{questTarget.Serial}]...");
+                    }
+                    else
+                    {
+                        if (autoStartQuest && !recoveryLaunchAttempted &&
+                            !IsQuestPadProcessRunning(adb, questTarget.Serial))
+                        {
+                            if (AdbQuestDeviceSelector.TryStartQuestPad(adb, questTarget, out string startError))
+                            {
+                                recoveryLaunchAttempted = true;
+                                bridgeWaitLogged = false;
+                                Console.WriteLine("QuestPad APK was not running; recovery launch requested over ADB.");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"QuestPad recovery launch failed: {startError}");
+                                adbForwardPrepared = false;
+                            }
+                        }
+                        else if (!bridgeWaitLogged)
+                        {
+                            Console.WriteLine("Quest ADB forward is restored; waiting for the QuestPad bridge listener...");
+                            bridgeWaitLogged = true;
+                        }
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"\ntransport lost/watchdog fired: {ex.Message}; reconnecting...");
+                }
+
+                try { await Task.Delay(750, ct); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -637,6 +732,9 @@ internal static class Program
         "1" or "on" or "true" or "yes" or "enabled" => true,
         _ => false
     };
+
+    private static bool IsQuestPadProcessRunning(string adb, string serial) =>
+        RunAdb(adb, serial, "shell", "pidof", AdbQuestDeviceSelector.QuestPadPackage);
 
     private static bool RunAdb(string adb, string? serial, params string[] arguments)
     {

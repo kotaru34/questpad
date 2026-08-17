@@ -664,7 +664,7 @@ void android_main(android_app* app) {
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
-    ici.applicationInfo.applicationVersion = 5;
+    ici.applicationInfo.applicationVersion = 6;
     std::strncpy(ici.applicationInfo.engineName, "QuestPadNative", XR_MAX_ENGINE_NAME_SIZE - 1);
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
