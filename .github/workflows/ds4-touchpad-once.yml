@@ -1,3 +1,4 @@
+# one-shot trigger
 name: ds4-touchpad-once
 
 on:
@@ -28,14 +29,10 @@ jobs:
                   raise SystemExit(f'{path}: expected one match, got {s.count(old)} for {old!r}')
               p.write_text(s.replace(old, new, 1), encoding='utf-8')
 
-          # Logical state gains one DS4-only extra button.
           rep('host/InputModels.cs',
               '    public bool Guide;\n',
               '    public bool Guide;\n    public bool TouchpadClick;\n')
 
-          # Mapper: Menu+L3 is the symmetric partner of Menu+R3 (View/Share),
-          # but only intercepts L3 while DS4 extras are enabled so Xbox behavior
-          # remains byte-for-byte equivalent.
           rep('host/ControllerMapper.cs',
               '    private bool viewHoldActive;\n',
               '    private bool viewHoldActive;\n    private bool touchpadHoldActive;\n')
@@ -64,22 +61,18 @@ jobs:
               '            Guide = guide\n',
               '            Guide = guide,\n            TouchpadClick = touchpad\n')
 
-          # Program enables this modifier only for DS4 output.
           rep('host/Program.cs',
               '                                p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);\n',
               '                                p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG,\n                                cfg.Output == OutputMode.DualShock4);\n')
 
-          # DS4 third button byte: bit0 PS, bit1 touchpad click.
           rep('host/OutputBackends.cs',
               '        r[6] = s.Guide ? (byte)0x01 : (byte)0x00; // PS\n',
               '        r[6] = 0;\n        if (s.Guide) r[6] |= 0x01;          // PS Home\n        if (s.TouchpadClick) r[6] |= 0x02;  // Touchpad click\n')
 
-          # Version bump for Windows-only feature candidate.
           for project in ('host/QuestPad.Host.csproj', 'host/QuestPad.Host.Console.csproj'):
               rep(project, '<Version>0.3.8-test</Version>', '<Version>0.3.9-test</Version>')
               rep(project, '<FileVersion>0.3.8.0</FileVersion>', '<FileVersion>0.3.9.0</FileVersion>')
 
-          # User-facing docs.
           rep('README.md',
               '| Menu + R3 | held Back / View |\n| Menu + LT + RT for 0.75 s | Guide |\n',
               '| Menu + R3 | held Back / View |\n| Menu + L3 (DS4 only) | Touchpad click |\n| Menu + LT + RT for 0.75 s | Guide / PS |\n')
