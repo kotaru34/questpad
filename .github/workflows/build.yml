@@ -2,7 +2,7 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main, passthrough-mr-v032 ]
+    branches: [ main ]
 
 jobs:
   quest-apk:
