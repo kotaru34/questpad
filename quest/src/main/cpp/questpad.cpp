@@ -12,6 +12,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "passthrough_support.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
@@ -36,6 +38,7 @@ constexpr uint16_t kPort = 38888;
 constexpr uint32_t kMagic = 0x44415051u; // QPAD little-endian
 constexpr uint32_t kFeedbackMagic = 0x31424651u; // QFB1 little-endian
 constexpr uint16_t kProtocolVersion = 2;
+constexpr uint16_t kControlPassthrough = 1u << 8;
 constexpr uint64_t kExitHoldNs = 3'000'000'000ULL;
 constexpr uint64_t kExitPulseNs = 125'000'000ULL;
 constexpr float kShoulderPressThreshold = 0.62f;
@@ -84,7 +87,7 @@ struct __attribute__((packed)) RumblePacket {
     uint32_t magic;
     uint8_t largeMotor;
     uint8_t smallMotor;
-    uint16_t control; // host -> Quest motion acquisition mode
+    uint16_t control; // host -> Quest motion + view control word
 };
 static_assert(sizeof(RumblePacket) == 8, "RumblePacket wire size changed");
 
@@ -94,6 +97,8 @@ enum PacketFlags : uint32_t {
     FLAG_LEFT_ACTIVE = 1u << 2,
     FLAG_RIGHT_ACTIVE = 1u << 3,
     FLAG_EXIT_ARMED = 1u << 4,
+    FLAG_PASSTHROUGH_AVAILABLE = 1u << 5,
+    FLAG_PASSTHROUGH_ACTIVE = 1u << 6,
 };
 
 enum Buttons : uint32_t {
@@ -642,14 +647,16 @@ void android_main(android_app* app) {
     bool refreshExt = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     bool touchPlusExt = hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     bool batteryExt = hasExtension(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
+    bool passthroughExt = hasExtension(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     if (perfExt) extensions.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
     if (refreshExt) extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     if (touchPlusExt) extensions.push_back(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     if (batteryExt) extensions.push_back(XR_EXT_INTERACTION_PROFILE_BATTERY_STATE_DISPLAY_EXTENSION_NAME);
+    if (passthroughExt) extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
-    ici.applicationInfo.applicationVersion = 3;
+    ici.applicationInfo.applicationVersion = 4;
     std::strncpy(ici.applicationInfo.engineName, "QuestPadNative", XR_MAX_ENGINE_NAME_SIZE - 1);
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
@@ -675,8 +682,12 @@ void android_main(android_app* app) {
     XrSession session = XR_NULL_HANDLE;
     if (!xrOk(instance, xrCreateSession(instance, &sci, &session), "xrCreateSession")) { destroyEgl(egl); xrDestroyInstance(instance); return; }
 
+    questpad::PassthroughSupport passthrough;
+    bool passthroughAvailable = passthrough.initialize(instance, systemId, session, passthroughExt);
+    LOGI("XR_FB_passthrough %s", passthroughAvailable ? "available" : "unavailable");
+
     Actions actions;
-    if (!setupActions(instance, session, actions, touchPlusExt)) { xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance); return; }
+    if (!setupActions(instance, session, actions, touchPlusExt)) { passthrough.destroy(app->activity); xrDestroySession(session); destroyEgl(egl); xrDestroyInstance(instance); return; }
 
     XrReferenceSpaceCreateInfo localInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     localInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
@@ -730,6 +741,7 @@ void android_main(android_app* app) {
                 sessionState = changed->state;
                 focused = changed->state == XR_SESSION_STATE_FOCUSED;
                 if (changed->state == XR_SESSION_STATE_STOPPING && sessionActive) {
+                    passthrough.setEnabled(false, app->activity);
                     xrEndSession(session); sessionActive = false; focused = false;
                 } else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING) quit = true;
             }
@@ -760,6 +772,8 @@ void android_main(android_app* app) {
 
         FeedbackState feedback = bridge.pollFeedback();
         uint16_t motionRequest = feedback.control & 0x3u;
+        bool wantPassthrough = (feedback.control & kControlPassthrough) != 0;
+        passthrough.setEnabled(wantPassthrough, app->activity);
 
         PadPacket packet{};
         packet.magic = kMagic; packet.version = kProtocolVersion; packet.size = sizeof(PadPacket);
@@ -767,6 +781,8 @@ void android_main(android_app* app) {
         bool effectiveFocused = focused && resumed && !exitRequested;
         if (sessionActive) packet.flags |= FLAG_SESSION_ACTIVE;
         if (effectiveFocused) packet.flags |= FLAG_FOCUSED;
+        if (passthrough.available()) packet.flags |= FLAG_PASSTHROUGH_AVAILABLE;
+        if (passthrough.active()) packet.flags |= FLAG_PASSTHROUGH_ACTIVE;
 
         if (packet.monotonicNs >= nextThermalPoll) {
             thermal = getThermalStatus(app->activity);
@@ -855,6 +871,8 @@ void android_main(android_app* app) {
                 if (held >= kExitHoldNs && !exitRequested) {
                     cue(3, 255); packet = PadPacket{}; packet.magic = kMagic; packet.version = kProtocolVersion;
                     packet.size = sizeof(PadPacket); packet.sequence = sequence++; packet.monotonicNs = monoNs(); packet.thermalStatus = thermal;
+                    if (passthrough.available()) packet.flags |= FLAG_PASSTHROUGH_AVAILABLE;
+                    if (passthrough.active()) packet.flags |= FLAG_PASSTHROUGH_ACTIVE;
                     exitRequested = true;
                     if (XR_FAILED(xrRequestExitSession(session))) quit = true;
                 }
@@ -877,12 +895,22 @@ void android_main(android_app* app) {
         }
 
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
-        ei.displayTime = fs.predictedDisplayTime; ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        ei.layerCount = 0; ei.layers = nullptr; xrEndFrame(session, &ei);
+        ei.displayTime = fs.predictedDisplayTime;
+        ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        const XrCompositionLayerBaseHeader* passthroughLayer = passthrough.compositionLayer();
+        if (passthroughLayer) {
+            ei.layerCount = 1;
+            ei.layers = &passthroughLayer;
+        } else {
+            ei.layerCount = 0;
+            ei.layers = nullptr;
+        }
+        xrEndFrame(session, &ei);
     }
 
     setHaptic(session, actions.lHaptic, 0); setHaptic(session, actions.rHaptic, 0);
     bridge.stop();
+    passthrough.destroy(app->activity);
     if (sessionActive) xrEndSession(session);
     if (leftSpace != XR_NULL_HANDLE) xrDestroySpace(leftSpace);
     if (rightSpace != XR_NULL_HANDLE) xrDestroySpace(rightSpace);
