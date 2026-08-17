@@ -1,4 +1,4 @@
-# one-shot trigger
+# one-shot trigger v2
 name: ds4-touchpad-once
 
 on:
@@ -37,8 +37,8 @@ jobs:
               '    private bool viewHoldActive;\n',
               '    private bool viewHoldActive;\n    private bool touchpadHoldActive;\n')
           rep('host/ControllerMapper.cs',
-              '        viewHoldActive = false;\n',
-              '        viewHoldActive = false;\n        touchpadHoldActive = false;\n')
+              '        startHoldActive = false;\n        viewHoldActive = false;\n        menuDownTicks = 0;\n',
+              '        startHoldActive = false;\n        viewHoldActive = false;\n        touchpadHoldActive = false;\n        menuDownTicks = 0;\n')
           rep('host/ControllerMapper.cs',
               '        float rg)\n',
               '        float rg,\n        bool enableDs4Extras = false)\n')
