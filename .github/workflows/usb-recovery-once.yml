@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   apply:
-    if: startsWith(github.event.head_commit.message, 'Run USB reconnect recovery patch')
+    if: startsWith(github.event.head_commit.message, 'Run hardened USB reconnect recovery patch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,7 @@ jobs:
           ref: agent/session-polish
           fetch-depth: 0
       - name: Apply patch
-        run: python scripts/usb_recovery_patch.py
+        run: python scripts/usb_recovery_patch2.py
       - name: Remove one-shot workflow
         run: rm .github/workflows/usb-recovery-once.yml
       - name: Commit
