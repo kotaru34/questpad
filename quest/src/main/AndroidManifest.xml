@@ -4,6 +4,9 @@
 
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" />
+    <!-- Matches Meta's native XR_FB_passthrough sample. QuestPad does not request
+         android.permission.CAMERA because the runtime/compositor owns passthrough. -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
 
     <application
         android:allowBackup="false"
