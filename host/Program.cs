@@ -14,6 +14,8 @@ internal static class Program
     private const int PacketSize = 152;
     private const uint FeedbackMagic = 0x31424651; // QFB1 little-endian
     private const int FeedbackSize = 8;
+    private const uint FlagPassthroughAvailable = 1u << 5;
+    private const uint FlagPassthroughActive = 1u << 6;
     private const float SteeringGripClutchThreshold = 0.12f;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
@@ -50,6 +52,12 @@ internal static class Program
                     break;
                 case "--gyro-smoothing" when i + 1 < args.Length:
                     Settings.SetGyroSmoothing(ParseSmoothing(args[++i]));
+                    break;
+                case "--quest-view" when i + 1 < args.Length:
+                    Settings.SetQuestView(ParseQuestView(args[++i]));
+                    break;
+                case "--passthrough":
+                    Settings.SetQuestView(QuestViewMode.Passthrough);
                     break;
                 case "--steering" when i + 1 < args.Length:
                     Settings.SetSteering(ParseSteering(args[++i]));
@@ -180,7 +188,7 @@ internal static class Program
                 Console.WriteLine("Waiting for QuestPad on Quest...");
                 await tcp.ConnectAsync("127.0.0.1", Port, ct);
                 Status.SetConnection(true);
-                Console.WriteLine("QuestPad transport connected (protocol v2 motion-capable)");
+                Console.WriteLine("QuestPad transport connected (protocol v2 motion/MR-capable)");
                 mapper.Reset();
                 motionProcessor.Reset();
 
@@ -221,6 +229,17 @@ internal static class Program
                         lastFeedbackTicks = feedbackNow;
                     }
 
+                    bool passthroughAvailable = (p.Flags & FlagPassthroughAvailable) != 0;
+                    bool passthroughActive = (p.Flags & FlagPassthroughActive) != 0;
+                    string questViewText = cfg.QuestView switch
+                    {
+                        QuestViewMode.Black => "black / zero-layer",
+                        _ when passthroughActive => "passthrough active",
+                        _ when !passthroughAvailable => "passthrough unavailable",
+                        _ => "passthrough starting / paused"
+                    };
+                    Status.SetQuestViewStatus(questViewText);
+
                     MotionFrame motionFrame = ToMotionFrame(p);
                     if (DisarmSteeringRequested)
                     {
@@ -241,7 +260,7 @@ internal static class Program
 
                     string gyroText = cfg.GyroSource switch
                     {
-                        GyroSourceMode.CameraAssisted => $"camera EXP {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
+                        GyroSourceMode.CameraAssisted => $"camera DIAG {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
                         GyroSourceMode.AngularRate => $"angular-rate {(motion.GyroValid ? "valid" : "waiting for AV=1")}",
                         _ => "off"
                     };
@@ -278,10 +297,10 @@ internal static class Program
                             LogicalGamepadState state = mapper.Map(
                                 p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
 
-                            // Steering mode owns horizontal steering completely. Never
-                            // leave a stale non-zero wheel value or fall back to physical
-                            // LX while the experimental wheel mode is armed/configured:
-                            // invalid/disarmed/clutch-open states are explicitly neutral.
+                            // The single retained mounted-steering experiment owns LX
+                            // completely while enabled. Invalid/disarmed/clutch-open
+                            // states are explicitly neutral so desktop gamepad-to-mouse
+                            // layers can never inherit a stale steering value.
                             if (cfg.Steering != SteeringMode.Off)
                             {
                                 state.LX = motion.SteeringValid && steeringClutchEngaged
@@ -306,7 +325,7 @@ internal static class Program
                         string batteryText = $"bat L {BatteryText(snapshot.LeftBattery),4} R {BatteryText(snapshot.RightBattery),4} [{snapshot.BatterySource}]";
                         Console.Write(
                             $"\r{hz,5:F1} Hz seq {p.Sequence,8} {snapshot.OutputBackend,-28} " +
-                            $"gyro {gyroText,-31} steer {snapshot.SteeringStatus,-45} " +
+                            $"view {snapshot.QuestViewStatus,-27} gyro {gyroText,-31} steer {snapshot.SteeringStatus,-40} " +
                             $"{batteryText} therm {ThermalName(p.Thermal),8} drops {dropped}      ");
                     }
                 }
@@ -437,11 +456,15 @@ internal static class Program
         _ => GyroSourceMode.Off
     };
 
+    private static QuestViewMode ParseQuestView(string value) => value.ToLowerInvariant() switch
+    {
+        "passthrough" or "pass" or "mr" or "mixed-reality" => QuestViewMode.Passthrough,
+        _ => QuestViewMode.Black
+    };
+
     private static SteeringMode ParseSteering(string value) => value.ToLowerInvariant() switch
     {
         "mounted" or "rigid" => SteeringMode.Mounted,
-        "freeair" or "free-air" or "optical" => SteeringMode.FreeAir,
-        "hybrid" or "auto" => SteeringMode.Hybrid,
         _ => SteeringMode.Off
     };
 
@@ -524,10 +547,12 @@ internal static class Program
             "QuestPad.Host [options]\n" +
             "  --adb PATH                 adb.exe path\n" +
             "  --serial SERIAL            select Android device\n" +
+            "  --quest-view black|passthrough\n" +
+            "  --passthrough              alias for --quest-view passthrough\n" +
             "  --output xbox|ds4          virtual controller backend\n" +
             "  --gyro off|rate|camera     right-Touch native gyro source\n" +
             "  --gyro-smoothing off|light|medium|strong\n" +
-            "  --steering off|mounted|freeair|hybrid\n" +
+            "  --steering off|mounted     limited mounted-wheel experiment\n" +
             "  --steering-range DEG       total lock-to-lock range (60..1080)\n" +
             "  --steering-smoothing off|light|medium|strong\n" +
             "  --steering-clutch on|off   require light grip on both Touch controllers\n" +
@@ -536,11 +561,12 @@ internal static class Program
             "  --no-gamepad               transport/motion diagnostic only\n" +
             "  --no-adb                   assume tcp:38888 is already forwarded\n" +
             "  --no-tray                  console-only mode\n\n" +
+            "Quest view 'black' is the zero-composition-layer low-workload PC-only mode.\n" +
+            "Quest view 'passthrough' requests the optional compositor passthrough layer for MR use.\n" +
             "Gyro 'rate' is the recommended path and consumes controller-local OpenXR angular velocity.\n" +
-            "Gyro 'camera' is an experimental A/B reference that derives rate from tracked pose and requires PT=1.\n" +
-            "Neither mode is raw MEMS access; Horizon may still perform internal sensor fusion.\n" +
-            "Steering is fail-safe: tracking/geometry faults force LX=0 and persistent faults disarm it.\n" +
-            "After Center + arm steering, turn RIGHT briefly first to establish the positive wheel axis.\n" +
+            "Gyro 'camera' is a diagnostic A/B reference that derives rate from tracked pose and requires PT=1.\n" +
+            "Neither gyro mode is raw MEMS access; Horizon may still perform internal sensor fusion.\n" +
+            "Steering is a deliberately limited mounted-wheel experiment, not a native multi-turn HID wheel.\n" +
             "Selecting a non-off gyro source automatically selects the DS4 backend.\n" +
             "After a Quest reboot, Horizon currently needs to see the controller once before motion becomes valid.\n" +
             "For a real console window use QuestPad.Host.Console.exe.";
