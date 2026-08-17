@@ -14,12 +14,14 @@ internal static class Program
     private const int PacketSize = 152;
     private const uint FeedbackMagic = 0x31424651; // QFB1 little-endian
     private const int FeedbackSize = 8;
+    private const float SteeringGripClutchThreshold = 0.12f;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
     private static readonly HostStatus Status = new();
     private static readonly RuntimeSettings Settings = new();
     private static volatile bool EmulationPaused;
     private static volatile bool CalibrateSteeringRequested;
+    private static volatile bool DisarmSteeringRequested;
     private static int RumblePacked; // high byte = large motor, low byte = small motor
 
     private static async Task<int> Main(string[] args)
@@ -58,6 +60,15 @@ internal static class Program
                 case "--steering-range" when i + 1 < args.Length && float.TryParse(args[++i], out float range):
                     Settings.SetSteeringRange(range);
                     break;
+                case "--steering-clutch" when i + 1 < args.Length:
+                    Settings.SetSteeringGripClutch(ParseOnOff(args[++i]));
+                    break;
+                case "--steering-invert" when i + 1 < args.Length:
+                    Settings.SetSteeringInverted(ParseOnOff(args[++i]));
+                    break;
+                case "--steering-arm":
+                    CalibrateSteeringRequested = true;
+                    break;
                 case "--no-gamepad":
                     noGamepad = true;
                     break;
@@ -84,6 +95,7 @@ internal static class Program
             Status,
             Settings,
             () => CalibrateSteeringRequested = true,
+            () => DisarmSteeringRequested = true,
             paused =>
             {
                 EmulationPaused = paused;
@@ -210,21 +222,33 @@ internal static class Program
                     }
 
                     MotionFrame motionFrame = ToMotionFrame(p);
+                    if (DisarmSteeringRequested)
+                    {
+                        DisarmSteeringRequested = false;
+                        motionProcessor.DisarmSteering();
+                        Console.WriteLine("\nSteering manually disarmed; LX is forced neutral until Center + arm steering is used.");
+                    }
                     if (CalibrateSteeringRequested)
                     {
                         CalibrateSteeringRequested = false;
-                        motionProcessor.CalibrateSteering(motionFrame);
-                        Console.WriteLine("\nSteering center captured; turn the wheel left/right briefly so QuestPad can learn its physical rotation axis.");
+                        motionProcessor.CalibrateSteering(motionFrame, cfg.Steering);
+                        Console.WriteLine("\nSteering center/geometry captured. Turn RIGHT briefly first so QuestPad can learn a deterministic positive wheel axis.");
                     }
 
                     ProcessedMotion motion = motionProcessor.Process(motionFrame, cfg);
+                    bool steeringClutchEngaged = !cfg.SteeringGripClutch ||
+                        (p.LG >= SteeringGripClutchThreshold && p.RG >= SteeringGripClutchThreshold);
+
                     string gyroText = cfg.GyroSource switch
                     {
-                        GyroSourceMode.CameraAssisted => $"camera-assisted {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
+                        GyroSourceMode.CameraAssisted => $"camera EXP {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
                         GyroSourceMode.AngularRate => $"angular-rate {(motion.GyroValid ? "valid" : "waiting for AV=1")}",
                         _ => "off"
                     };
-                    Status.UpdateMotionStatus(motion.GyroValid, gyroText, cfg.Steering == SteeringMode.Off ? "off" : motion.SteeringState);
+                    string steeringText = cfg.Steering == SteeringMode.Off ? "off" : motion.SteeringState;
+                    if (cfg.Steering != SteeringMode.Off && cfg.SteeringGripClutch && !steeringClutchEngaged)
+                        steeringText += " | clutch open → LX=0";
+                    Status.UpdateMotionStatus(motion.GyroValid, gyroText, steeringText);
 
                     IOutputBackend? backend = null;
                     if (outputs is not null)
@@ -254,12 +278,16 @@ internal static class Program
                             LogicalGamepadState state = mapper.Map(
                                 p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
 
-                            // Wheel mode replaces only steering. Every other gamepad control
-                            // remains live. If tracking is unavailable for >500 ms the
-                            // estimator marks itself invalid and the physical left stick is
-                            // an immediate fallback rather than an abrupt auto-centering car.
-                            if (cfg.Steering != SteeringMode.Off && motion.SteeringValid)
-                                state.LX = motion.SteeringNormalized;
+                            // Steering mode owns horizontal steering completely. Never
+                            // leave a stale non-zero wheel value or fall back to physical
+                            // LX while the experimental wheel mode is armed/configured:
+                            // invalid/disarmed/clutch-open states are explicitly neutral.
+                            if (cfg.Steering != SteeringMode.Off)
+                            {
+                                state.LX = motion.SteeringValid && steeringClutchEngaged
+                                    ? motion.SteeringNormalized
+                                    : 0.0f;
+                            }
 
                             backend.Apply(state, motion);
                         }
@@ -278,7 +306,7 @@ internal static class Program
                         string batteryText = $"bat L {BatteryText(snapshot.LeftBattery),4} R {BatteryText(snapshot.RightBattery),4} [{snapshot.BatterySource}]";
                         Console.Write(
                             $"\r{hz,5:F1} Hz seq {p.Sequence,8} {snapshot.OutputBackend,-28} " +
-                            $"gyro {gyroText,-31} steer {snapshot.SteeringStatus,-30} " +
+                            $"gyro {gyroText,-31} steer {snapshot.SteeringStatus,-45} " +
                             $"{batteryText} therm {ThermalName(p.Thermal),8} drops {dropped}      ");
                     }
                 }
@@ -425,6 +453,12 @@ internal static class Program
         _ => SmoothingLevel.Off
     };
 
+    private static bool ParseOnOff(string value) => value.ToLowerInvariant() switch
+    {
+        "1" or "on" or "true" or "yes" or "enabled" => true,
+        _ => false
+    };
+
     private static bool RunAdb(string adb, string? serial, params string[] arguments)
     {
         try
@@ -491,16 +525,22 @@ internal static class Program
             "  --adb PATH                 adb.exe path\n" +
             "  --serial SERIAL            select Android device\n" +
             "  --output xbox|ds4          virtual controller backend\n" +
-            "  --gyro off|camera|rate     right-Touch native gyro source\n" +
+            "  --gyro off|rate|camera     right-Touch native gyro source\n" +
             "  --gyro-smoothing off|light|medium|strong\n" +
             "  --steering off|mounted|freeair|hybrid\n" +
             "  --steering-range DEG       total lock-to-lock range (60..1080)\n" +
             "  --steering-smoothing off|light|medium|strong\n" +
+            "  --steering-clutch on|off   require light grip on both Touch controllers\n" +
+            "  --steering-invert on|off   reverse steering output direction\n" +
+            "  --steering-arm             center + arm on the first received motion frame\n" +
             "  --no-gamepad               transport/motion diagnostic only\n" +
             "  --no-adb                   assume tcp:38888 is already forwarded\n" +
             "  --no-tray                  console-only mode\n\n" +
-            "Gyro 'camera' derives rate from tracked pose and deliberately requires PT=1.\n" +
-            "Gyro 'rate' consumes only controller-local OpenXR angular velocity; it is not raw MEMS.\n" +
+            "Gyro 'rate' is the recommended path and consumes controller-local OpenXR angular velocity.\n" +
+            "Gyro 'camera' is an experimental A/B reference that derives rate from tracked pose and requires PT=1.\n" +
+            "Neither mode is raw MEMS access; Horizon may still perform internal sensor fusion.\n" +
+            "Steering is fail-safe: tracking/geometry faults force LX=0 and persistent faults disarm it.\n" +
+            "After Center + arm steering, turn RIGHT briefly first to establish the positive wheel axis.\n" +
             "Selecting a non-off gyro source automatically selects the DS4 backend.\n" +
             "After a Quest reboot, Horizon currently needs to see the controller once before motion becomes valid.\n" +
             "For a real console window use QuestPad.Host.Console.exe.";
