@@ -13,8 +13,8 @@
     <ApplicationIcon>questpad.ico</ApplicationIcon>
     <Product>QuestPad</Product>
     <Description>Meta Quest Touch Plus controller bridge for Windows</Description>
-    <Version>0.4.0-test</Version>
-    <FileVersion>0.4.0.0</FileVersion>
+    <Version>0.4.1-test</Version>
+    <FileVersion>0.4.1.0</FileVersion>
     <DefineConstants>$(DefineConstants);QUESTPAD_CONSOLE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
