@@ -55,8 +55,7 @@ public:
     bool initialize(XrInstance instance, XrSystemId systemId, XrSession session, bool extensionEnabled) {
         instance_ = instance;
         session_ = session;
-        extensionEnabled_ = extensionEnabled;
-        if (!extensionEnabled_) return false;
+        if (!extensionEnabled) return false;
 
         XrSystemPassthroughPropertiesFB passthroughProperties{XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES_FB};
         XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
@@ -90,10 +89,11 @@ public:
 
     void setEnabled(bool enabled, ANativeActivity* activity) {
         if (enabled == active_) return;
+        if (enabled && !available_) return;
+
         if (enabled) {
             if (!ensureCreated()) {
                 available_ = false;
-                setWindowBrightness(activity, 0.0f);
                 return;
             }
 
@@ -116,8 +116,8 @@ public:
             compositionLayer_.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
             compositionLayer_.space = XR_NULL_HANDLE;
             active_ = true;
-            // -1 tells Android to use the system/default brightness instead of the
-            // zero-layer power-saving override.
+            // Android's documented override sentinel: restore system/app brightness
+            // instead of keeping QuestPad's zero-layer minimum-brightness override.
             setWindowBrightness(activity, -1.0f);
         } else {
             if (layer_ != XR_NULL_HANDLE && pauseLayer_) pauseLayer_(layer_);
@@ -170,7 +170,6 @@ private:
 
     XrInstance instance_ = XR_NULL_HANDLE;
     XrSession session_ = XR_NULL_HANDLE;
-    bool extensionEnabled_ = false;
     bool available_ = false;
     bool created_ = false;
     bool active_ = false;
