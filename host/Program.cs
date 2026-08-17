@@ -232,7 +232,7 @@ internal static class Program
             if (Volatile.Read(ref HostShutdownRequested) != 0 && !QuestUserExitRequested && adb is not null && serial is not null)
             {
                 if (GracefulQuestShutdownSent)
-                    await Task.Delay(200);
+                    await Task.Delay(750);
                 // ADB is the last-resort lifecycle backstop. On the normal path the
                 // protocol shutdown bit lets NativeActivity clean up first; force-stop
                 // is harmless if the process already exited and covers paused XR or a
@@ -304,6 +304,8 @@ internal static class Program
 
                     RuntimeSettingsSnapshot cfg = Settings.Snapshot();
                     ushort control = HostControlBits.For(cfg);
+                    if (Volatile.Read(ref HostShutdownRequested) != 0)
+                        control |= ControlQuestShutdown;
                     int rumble = outputs is null ? 0 : Volatile.Read(ref RumblePacked);
                     int feedbackKey = (rumble << 16) | control;
                     long feedbackNow = Stopwatch.GetTimestamp();
