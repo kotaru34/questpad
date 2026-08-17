@@ -8,6 +8,8 @@
 namespace questpad {
 
 constexpr const char* kPassthroughLogTag = "QuestPad";
+constexpr float kBlackWindowBrightness = 0.0f;
+constexpr float kPreferredWindowBrightness = -1.0f;
 
 inline bool clearJniException(JNIEnv* env, const char* step) {
     if (!env || !env->ExceptionCheck()) return false;
@@ -145,6 +147,17 @@ inline void setWindowBrightness(ANativeActivity* activity, float brightness) {
     finish();
 }
 
+inline void setBlackWindowBrightness(ANativeActivity* activity) {
+    setWindowBrightness(activity, kBlackWindowBrightness);
+}
+
+inline void restorePreferredWindowBrightness(ANativeActivity* activity) {
+    // BRIGHTNESS_OVERRIDE_NONE: stop overriding the user's/system's preferred
+    // brightness instead of guessing a numeric value. This also preserves Android's
+    // adaptive brightness policy when QuestPad switches to MR or exits.
+    setWindowBrightness(activity, kPreferredWindowBrightness);
+}
+
 class PassthroughSupport {
 public:
     bool initialize(XrInstance instance, XrSystemId systemId, XrSession session, bool extensionEnabled) {
@@ -219,7 +232,7 @@ public:
                 if (XR_FAILED(r)) logResult("xrPassthroughPauseFB", r);
             }
             active_ = false;
-            setWindowBrightness(activity, 0.0f);
+            setBlackWindowBrightness(activity);
             logInfo("passthrough disabled");
             return;
         }
@@ -230,7 +243,7 @@ public:
         if (!ensureCreated()) {
             available_ = false;
             enableBlockedUntilToggle_ = true;
-            setWindowBrightness(activity, 0.0f);
+            setBlackWindowBrightness(activity);
             return;
         }
 
@@ -239,7 +252,7 @@ public:
         if (XR_FAILED(startResult)) {
             active_ = false;
             enableBlockedUntilToggle_ = true;
-            setWindowBrightness(activity, 0.0f);
+            setBlackWindowBrightness(activity);
             return;
         }
 
@@ -249,7 +262,7 @@ public:
             if (pausePassthrough_) pausePassthrough_(passthrough_);
             active_ = false;
             enableBlockedUntilToggle_ = true;
-            setWindowBrightness(activity, 0.0f);
+            setBlackWindowBrightness(activity);
             return;
         }
 
@@ -267,10 +280,7 @@ public:
         compositionLayer_.space = XR_NULL_HANDLE;
         active_ = true;
 
-        // Android's documented override sentinel. JNI failures are now explicitly
-        // cleared so a Quest-specific WindowManager exception cannot poison the next
-        // periodic JNI call (thermal/battery diagnostics).
-        setWindowBrightness(activity, -1.0f);
+        restorePreferredWindowBrightness(activity);
         logInfo("passthrough active");
     }
 
@@ -296,6 +306,11 @@ public:
         }
         created_ = false;
         active_ = false;
+
+        // Black mode deliberately overrides only this Activity's window brightness.
+        // Always drop that override before NativeActivity is destroyed so Quest returns
+        // immediately to the user's/system's preferred brightness policy.
+        restorePreferredWindowBrightness(activity);
     }
 
 private:
