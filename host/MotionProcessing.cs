@@ -9,27 +9,37 @@ internal sealed class MotionProcessor
     private Quaternion previousCameraOrientation = Quaternion.Identity;
     private ulong previousCameraTimestamp;
     private bool havePreviousCamera;
+    private SteeringMode previousSteeringMode = SteeringMode.Off;
 
     public void Reset()
     {
         gyroFilter.Reset();
-        steering.ResetTracking();
+        steering.ResetAll("transport reset — center + arm");
         previousCameraOrientation = Quaternion.Identity;
         previousCameraTimestamp = 0;
         havePreviousCamera = false;
+        previousSteeringMode = SteeringMode.Off;
     }
 
-    public void CalibrateSteering(MotionFrame frame) => steering.Calibrate(frame);
+    public void CalibrateSteering(MotionFrame frame, SteeringMode mode) => steering.Calibrate(frame, mode);
+    public void DisarmSteering() => steering.Disarm("manually disarmed — center + arm");
 
     public ProcessedMotion Process(MotionFrame frame, RuntimeSettingsSnapshot settings)
     {
+        if (settings.Steering != previousSteeringMode)
+        {
+            steering.ModeChanged(settings.Steering);
+            previousSteeringMode = settings.Steering;
+        }
+
         Vector3 gyro = Vector3.Zero;
         bool gyroValid = false;
 
         if (settings.GyroSource == GyroSourceMode.AngularRate)
         {
-            // Windows consumes only the controller-local OpenXR angular-rate vector.
-            // This is still Horizon/OpenXR data rather than raw MEMS access.
+            // Primary gyro path: Windows consumes only the controller-local OpenXR
+            // angular-rate vector. This is Horizon/OpenXR data rather than raw MEMS,
+            // but it does not depend on QuestPad consuming optical pose information.
             if (frame.Right.Active && frame.Right.AngularValid)
             {
                 gyro = frame.Right.AngularVelocityLocal;
@@ -39,9 +49,8 @@ internal sealed class MotionProcessor
         }
         else if (settings.GyroSource == GyroSourceMode.CameraAssisted)
         {
-            // Deliberately require optical positional tracking for the A/B experiment.
-            // Rate is derived from successive tracked orientations instead of using
-            // XrSpaceVelocity, making this an explicitly camera-assisted reference.
+            // Experimental A/B reference. Deliberately require optical positional
+            // tracking and derive rate from successive tracked orientations.
             if (frame.Right.Active && frame.Right.OrientationTracked && frame.Right.PositionTracked)
             {
                 Quaternion q = NormalizeSafe(frame.Right.Orientation);
@@ -108,7 +117,12 @@ internal sealed class MotionProcessor
 
 internal sealed class SteeringEstimator
 {
+    private const ulong TrackingGraceNs = 250_000_000UL;
+    private const float MountMismatchDisarmDegrees = 18.0f;
+
     private bool calibrated;
+    private bool armed;
+    private string disarmReason = "needs center + arm";
     private Quaternion baseLeft;
     private Quaternion baseRight;
     private Quaternion baseRelative;
@@ -120,63 +134,157 @@ internal sealed class SteeringEstimator
     private bool haveAxis;
     private float axisEvidence;
     private float angleRadians;
-    private ulong lastGoodNs;
+    private float calibratedSpan;
+    private ulong invalidSinceNs;
     private readonly OneEuroScalar steeringFilter = new();
 
-    public void Calibrate(MotionFrame frame)
+    public void ModeChanged(SteeringMode mode)
     {
-        if (!frame.Left.OrientationValid || !frame.Right.OrientationValid)
+        if (mode == SteeringMode.Off)
+            ResetAll("off");
+        else
+            ResetAll("mode changed — center + arm");
+    }
+
+    public void ResetAll(string reason)
+    {
+        calibrated = false;
+        armed = false;
+        disarmReason = reason;
+        baseLeft = Quaternion.Identity;
+        baseRight = Quaternion.Identity;
+        baseRelative = Quaternion.Identity;
+        previousCommonDelta = Quaternion.Identity;
+        previousSpan = Vector3.Zero;
+        havePreviousCommon = false;
+        havePreviousSpan = false;
+        wheelAxis = Vector3.Zero;
+        haveAxis = false;
+        axisEvidence = 0;
+        angleRadians = 0;
+        calibratedSpan = 0;
+        invalidSinceNs = 0;
+        steeringFilter.Reset();
+    }
+
+    public void Disarm(string reason)
+    {
+        calibrated = false;
+        armed = false;
+        disarmReason = reason;
+        havePreviousCommon = false;
+        havePreviousSpan = false;
+        angleRadians = 0;
+        invalidSinceNs = 0;
+        steeringFilter.Reset();
+    }
+
+    public void Calibrate(MotionFrame frame, SteeringMode mode)
+    {
+        if (mode == SteeringMode.Off)
+        {
+            ResetAll("steering is off");
             return;
+        }
+
+        bool orientationReady = frame.Left.Active && frame.Right.Active &&
+            frame.Left.OrientationTracked && frame.Right.OrientationTracked;
+        if (!orientationReady)
+        {
+            Disarm("center + arm failed — both controller orientations are required");
+            return;
+        }
+
+        if (mode == SteeringMode.FreeAir &&
+            !(frame.Left.PositionTracked && frame.Right.PositionTracked))
+        {
+            Disarm("center + arm failed — free-air requires PT=1 for both controllers");
+            return;
+        }
 
         baseLeft = MotionProcessor.NormalizeSafe(frame.Left.Orientation);
         baseRight = MotionProcessor.NormalizeSafe(frame.Right.Orientation);
         baseRelative = MotionProcessor.NormalizeSafe(Quaternion.Conjugate(baseLeft) * baseRight);
 
-        // Each hand is allowed to have an arbitrary mounting orientation. The wheel
-        // rigid-body rotation is measured as qNow * inverse(qAtCalibration), so two
-        // differently/mirrored mounted Touch controllers still produce the same delta.
         previousCommonDelta = Quaternion.Identity;
         havePreviousCommon = true;
 
         havePreviousSpan = frame.Left.PositionTracked && frame.Right.PositionTracked;
         if (havePreviousSpan)
+        {
             previousSpan = frame.Right.Position - frame.Left.Position;
+            calibratedSpan = previousSpan.Length();
+        }
+        else
+        {
+            previousSpan = Vector3.Zero;
+            calibratedSpan = 0;
+        }
 
         wheelAxis = Vector3.Zero;
         haveAxis = false;
         axisEvidence = 0;
         angleRadians = 0;
-        lastGoodNs = frame.QuestTimestampNs;
+        invalidSinceNs = 0;
         calibrated = true;
-        steeringFilter.Reset();
-    }
-
-    public void ResetTracking()
-    {
-        havePreviousCommon = false;
-        havePreviousSpan = false;
-        lastGoodNs = 0;
+        armed = true;
+        disarmReason = string.Empty;
         steeringFilter.Reset();
     }
 
     public (bool valid, float value, string state) Update(MotionFrame frame, RuntimeSettingsSnapshot settings)
     {
-        if (!calibrated)
-            return (false, 0, "needs calibration");
-
-        LearnAxis(frame);
-        if (!haveAxis)
-            return (false, 0, "learning wheel axis — turn left/right");
+        if (!calibrated || !armed)
+            return (false, 0, $"DISARMED — {disarmReason}");
 
         bool orientationGood = frame.Left.Active && frame.Right.Active &&
             frame.Left.OrientationTracked && frame.Right.OrientationTracked;
         bool opticalGood = frame.Left.PositionTracked && frame.Right.PositionTracked;
+
+        bool requiredTrackingGood = settings.Steering switch
+        {
+            SteeringMode.FreeAir => opticalGood,
+            SteeringMode.Hybrid => orientationGood || opticalGood,
+            _ => orientationGood
+        };
+
+        if (!requiredTrackingGood)
+            return HandleTransientInvalid(frame.QuestTimestampNs, "required controller tracking lost");
+
+        invalidSinceNs = 0;
 
         Quaternion commonDelta = previousCommonDelta;
         float mountError = 0;
         string orientationHealth = "orientation unavailable";
         if (orientationGood)
             commonDelta = FuseRigidDelta(frame, out mountError, out orientationHealth);
+
+        // Mounted and Hybrid are rigid-wheel modes. Small mounting creep can be fused;
+        // a large change means the physical configuration is no longer the calibrated
+        // wheel and continuing to steer is unsafe.
+        if (settings.Steering is SteeringMode.Mounted or SteeringMode.Hybrid)
+        {
+            if (orientationGood && mountError > Degrees(MountMismatchDisarmDegrees))
+            {
+                Disarm($"mount geometry changed {RadiansToDegrees(mountError):F1}° — center + arm");
+                return (false, 0, $"DISARMED — {disarmReason}");
+            }
+
+            if (opticalGood && calibratedSpan > 0.05f)
+            {
+                float currentSpan = (frame.Right.Position - frame.Left.Position).Length();
+                float allowedSpanError = Math.Max(0.08f, calibratedSpan * 0.25f);
+                if (MathF.Abs(currentSpan - calibratedSpan) > allowedSpanError)
+                {
+                    Disarm($"controller spacing changed by {MathF.Abs(currentSpan - calibratedSpan) * 100.0f:F0} cm — center + arm");
+                    return (false, 0, $"DISARMED — {disarmReason}");
+                }
+            }
+        }
+
+        LearnAxis(frame);
+        if (!haveAxis)
+            return (false, 0, "ARMED — learning wheel axis; turn RIGHT briefly first");
 
         bool useOptical = settings.Steering switch
         {
@@ -187,35 +295,35 @@ internal sealed class SteeringEstimator
         bool canUseOrientation = settings.Steering != SteeringMode.FreeAir && orientationGood;
 
         bool updated = false;
-        string source = "holding last value";
+        string source = "ready";
 
         if (useOptical)
         {
             // Position is consumed ONLY with PT=1 for both controllers. PV=1/PT=0
-            // values seen in Horizon tests are deliberately ignored as stale/predicted.
+            // values observed on Horizon are deliberately ignored.
             Vector3 span = frame.Right.Position - frame.Left.Position;
-            if (span.LengthSquared() > 0.01f)
+            if (span.LengthSquared() <= 0.01f)
+                return HandleTransientInvalid(frame.QuestTimestampNs, "optical wheel span is implausibly small");
+
+            if (havePreviousSpan)
             {
-                if (havePreviousSpan)
-                {
-                    float step = SignedProjectedAngle(previousSpan, span, wheelAxis);
-                    if (MathF.Abs(step) < Degrees(45))
-                    {
-                        angleRadians += step;
-                        updated = true;
-                        source = settings.Steering == SteeringMode.Hybrid ? "hybrid optical" : "free-air optical";
-                    }
-                    else
-                    {
-                        source = "rejected optical steering spike";
-                    }
-                }
-                previousSpan = span;
-                havePreviousSpan = true;
+                float step = SignedProjectedAngle(previousSpan, span, wheelAxis);
+                if (MathF.Abs(step) >= Degrees(45))
+                    return HandleTransientInvalid(frame.QuestTimestampNs, "optical steering spike rejected");
+
+                angleRadians += step;
+                source = settings.Steering == SteeringMode.Hybrid ? "hybrid optical" : "free-air optical";
+            }
+            else
+            {
+                source = settings.Steering == SteeringMode.Hybrid ? "hybrid optical baseline" : "free-air optical baseline";
             }
 
-            // Keep the orientation baseline synchronized while optical steering is in
-            // charge. A later Hybrid fallback can then take over without a jump.
+            previousSpan = span;
+            havePreviousSpan = true;
+            updated = true;
+
+            // Keep orientation synchronized so Hybrid can fall back without a jump.
             if (orientationGood)
             {
                 previousCommonDelta = commonDelta;
@@ -233,47 +341,48 @@ internal sealed class SteeringEstimator
             {
                 Quaternion stepQ = MotionProcessor.NormalizeSafe(commonDelta * Quaternion.Conjugate(previousCommonDelta));
                 float step = TwistAngle(stepQ, wheelAxis);
+                float maxStep = mountError > Degrees(8) ? Degrees(18) : Degrees(45);
+                if (MathF.Abs(step) > maxStep)
+                    return HandleTransientInvalid(frame.QuestTimestampNs, "orientation steering spike rejected");
 
-                // Large relative-mount disagreement means one controller probably
-                // slipped or one tracking sample jumped. FuseRigidDelta already trusts
-                // the hand closest to the predicted wheel state; clamp remaining
-                // implausible one-frame wheel rotation as a second safety barrier.
-                float maxStep = mountError > Degrees(25) ? Degrees(10) : Degrees(45);
-                if (MathF.Abs(step) <= maxStep)
-                {
-                    angleRadians += step;
-                    updated = true;
-                    source = mountError > Degrees(8)
-                        ? $"mounted orientation — {orientationHealth}, mismatch {RadiansToDegrees(mountError):F1}°"
-                        : "mounted orientation";
-                }
-                else
-                {
-                    source = "rejected tracking/mounting spike";
-                }
+                angleRadians += step;
             }
 
             previousCommonDelta = commonDelta;
             havePreviousCommon = true;
-        }
-        else if (!orientationGood && !useOptical)
-        {
-            havePreviousCommon = false;
+            updated = true;
+            source = mountError > Degrees(8)
+                ? $"mounted orientation — {orientationHealth}, mismatch {RadiansToDegrees(mountError):F1}°"
+                : "mounted orientation";
         }
 
-        if (updated)
-            lastGoodNs = frame.QuestTimestampNs;
+        if (!updated)
+            return HandleTransientInvalid(frame.QuestTimestampNs, "no safe steering source available");
 
+        invalidSinceNs = 0;
         float halfRange = Math.Max(1.0f, settings.SteeringRangeDegrees * 0.5f);
         float raw = Math.Clamp(RadiansToDegrees(angleRadians) / halfRange, -1.0f, 1.0f);
+        if (settings.SteeringInverted)
+            raw = -raw;
         float filtered = steeringFilter.Filter(raw, frame.QuestTimestampNs, settings.SteeringSmoothing);
+        return (true, filtered, $"ARMED — {source}");
+    }
 
-        // Brief dropouts freeze the last wheel position. Do not auto-center a car just
-        // because Horizon idled/lost a controller. After 500 ms the host falls back to
-        // the physical left stick by treating steering as invalid.
-        bool recent = lastGoodNs != 0 && frame.QuestTimestampNs >= lastGoodNs &&
-            frame.QuestTimestampNs - lastGoodNs <= 500_000_000UL;
-        return (updated || recent, filtered, source);
+    private (bool valid, float value, string state) HandleTransientInvalid(ulong timestampNs, string reason)
+    {
+        if (invalidSinceNs == 0)
+            invalidSinceNs = timestampNs;
+
+        if (timestampNs >= invalidSinceNs && timestampNs - invalidSinceNs >= TrackingGraceNs)
+        {
+            Disarm($"{reason} for >250 ms — center + arm");
+            return (false, 0, $"DISARMED — {disarmReason}");
+        }
+
+        // Safety is more important than preserving the last steering angle outside the
+        // game: a transient fault immediately emits neutral LX, and only becomes a
+        // permanent disarm if it lasts longer than the short grace interval.
+        return (false, 0, $"SAFETY HOLD — {reason}");
     }
 
     private Quaternion FuseRigidDelta(MotionFrame frame, out float mountError, out string health)
@@ -296,9 +405,9 @@ internal sealed class SteeringEstimator
             return Average(leftDelta, rightDelta);
         }
 
-        // If one controller shifts in a loose mount or suffers a tracking jump, choose
-        // the observation nearest the already-established wheel trajectory rather than
-        // averaging the bad sample halfway into the steering output.
+        // Small/medium loose-mount disagreement is handled as redundant sensor fusion:
+        // trust the hand nearest the established rigid-body trajectory instead of
+        // averaging one bad observation halfway into steering.
         float leftInnovation = QuaternionDistance(previousCommonDelta, leftDelta);
         float rightInnovation = QuaternionDistance(previousCommonDelta, rightDelta);
         if (leftInnovation + Degrees(1) < rightInnovation)
@@ -312,9 +421,6 @@ internal sealed class SteeringEstimator
             return rightDelta;
         }
 
-        // Ambiguous disagreement (for example gradual physical creep) is safer to
-        // average than to invent which mount moved. The mismatch is surfaced in tray
-        // status so the user can re-center if it keeps growing.
         health = "mount disagreement averaged";
         return Average(leftDelta, rightDelta);
     }
@@ -335,7 +441,12 @@ internal sealed class SteeringEstimator
 
         Vector3 n = candidate / speed;
         if (!haveAxis && axisEvidence == 0)
+        {
+            // The first deliberate post-calibration turn defines positive steering.
+            // UI/docs therefore instruct the user to turn RIGHT first. This avoids an
+            // arbitrary quaternion-axis sign deciding whether the wheel is inverted.
             wheelAxis = n;
+        }
         else
         {
             if (Vector3.Dot(n, wheelAxis) < 0) n = -n;
