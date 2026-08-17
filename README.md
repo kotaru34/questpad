@@ -90,11 +90,12 @@ For a real terminal and diagnostics:
 | Hold left Menu alone for 0.50 s | held Start / Menu |
 | Menu + right stick | D-pad, including diagonals |
 | Menu + R3 | held Back / View |
-| Menu + LT + RT for 0.75 s | Guide |
+| Menu + L3 (DS4 only) | Touchpad click |
+| Menu + LT + RT for 0.75 s | Guide / PS |
 
 The Meta/System button remains Horizon-owned.
 
-On the DS4 backend the same physical locations map naturally to Cross/Circle/Square/Triangle, L1/R1, L2/R2, Options, Share and PS. See [MAPPING.md](MAPPING.md).
+On the DS4 backend the same physical locations map naturally to Cross/Circle/Square/Triangle, L1/R1, L2/R2, Options, Share and PS. `Menu + L3` adds the DS4 touchpad click without changing Xbox-mode behavior. See [MAPPING.md](MAPPING.md).
 
 ### Exit gesture
 

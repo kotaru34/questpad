@@ -33,6 +33,7 @@ internal sealed class ControllerMapper
     private bool menuUsed;
     private bool startHoldActive;
     private bool viewHoldActive;
+    private bool touchpadHoldActive;
     private long menuDownTicks;
     private long guideStartTicks;
     private int startPulseFrames;
@@ -45,6 +46,7 @@ internal sealed class ControllerMapper
         menuUsed = false;
         startHoldActive = false;
         viewHoldActive = false;
+        touchpadHoldActive = false;
         menuDownTicks = 0;
         guideStartTicks = 0;
         startPulseFrames = 0;
@@ -59,7 +61,8 @@ internal sealed class ControllerMapper
         float lt,
         float rt,
         float lg,
-        float rg)
+        float rg,
+        bool enableDs4Extras = false)
     {
         long nowTicks = Stopwatch.GetTimestamp();
         bool menu = (buttons & BtnMenuRaw) != 0;
@@ -78,14 +81,18 @@ internal sealed class ControllerMapper
 
         if (viewHoldActive && !rightThumb)
             viewHoldActive = false;
+        if (touchpadHoldActive && !leftThumb)
+            touchpadHoldActive = false;
 
         bool view = viewHoldActive;
+        bool touchpad = touchpadHoldActive;
         bool guide = false;
         bool startHeld = false;
         float outRx = rx;
         float outRy = ry;
         float outLt = lt;
         float outRt = rt;
+        bool outLeftThumb = leftThumb;
         bool outRightThumb = rightThumb;
 
         if (menu)
@@ -113,6 +120,14 @@ internal sealed class ControllerMapper
                     viewHoldActive = true;
                     view = true;
                     outRightThumb = false;
+                    menuUsed = true;
+                }
+
+                if (enableDs4Extras && leftThumb)
+                {
+                    touchpadHoldActive = true;
+                    touchpad = true;
+                    outLeftThumb = false;
                     menuUsed = true;
                 }
 
@@ -149,6 +164,11 @@ internal sealed class ControllerMapper
             view = true;
             outRightThumb = false;
         }
+        if (touchpadHoldActive)
+        {
+            touchpad = true;
+            outLeftThumb = false;
+        }
 
         menuWasDown = menu;
         leftShoulder = Hysteresis(leftShoulder, lg, ShoulderPress, ShoulderRelease);
@@ -171,7 +191,7 @@ internal sealed class ControllerMapper
             B = (buttons & BtnB) != 0,
             X = (buttons & BtnX) != 0,
             Y = (buttons & BtnY) != 0,
-            L3 = leftThumb,
+            L3 = outLeftThumb,
             R3 = outRightThumb,
             DpadUp = dpadUp,
             DpadDown = dpadDown,
@@ -179,7 +199,8 @@ internal sealed class ControllerMapper
             DpadRight = dpadRight,
             View = view,
             Menu = startHeld || startPulseFrames > 0,
-            Guide = guide
+            Guide = guide,
+            TouchpadClick = touchpad
         };
 
         if (startPulseFrames > 0)

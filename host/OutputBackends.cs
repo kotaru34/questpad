@@ -220,7 +220,9 @@ internal sealed class DualShock4Backend : IOutputBackend
         if (s.R3) buttons |= 1 << 15;
         BinaryPrimitives.WriteUInt16LittleEndian(r.AsSpan(4, 2), buttons);
 
-        r[6] = s.Guide ? (byte)0x01 : (byte)0x00; // PS
+        r[6] = 0;
+        if (s.Guide) r[6] |= 0x01;          // PS Home
+        if (s.TouchpadClick) r[6] |= 0x02;  // Touchpad click
         r[7] = ToByte01(s.LT);
         r[8] = ToByte01(s.RT);
 

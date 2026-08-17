@@ -278,6 +278,7 @@ internal sealed class LogicalGamepadState
     public bool View;
     public bool Menu;
     public bool Guide;
+    public bool TouchpadClick;
 
     public LogicalGamepadState Clone() => (LogicalGamepadState)MemberwiseClone();
 

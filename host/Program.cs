@@ -444,7 +444,8 @@ internal static class Program
                         else
                         {
                             LogicalGamepadState state = mapper.Map(
-                                p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG);
+                                p.Buttons, p.LX, p.LY, p.RX, p.RY, p.LT, p.RT, p.LG, p.RG,
+                                cfg.Output == OutputMode.DualShock4);
 
                             if (cfg.Steering != SteeringMode.Off)
                             {

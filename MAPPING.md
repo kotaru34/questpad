@@ -31,9 +31,14 @@ The physical **left Menu** button is available to applications and acts as Start
 | Hold Menu by itself for 0.50 s | Start / Menu held | Options held |
 | Hold Menu + right stick | D-pad, including diagonals | D-pad, including diagonals |
 | Menu + R3 | Back / View held while R3 remains held | Share held while R3 remains held |
-| Hold Menu + LT + RT for 0.75 s | Guide | PS |
+| Menu + L3 | unchanged / no DS4 extra | Touchpad click held while L3 remains held |
+| Hold Menu + LT + RT for 0.75 s | Guide | PS Home |
 
-Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 is a genuine held View/Share state rather than a short pulse.
+Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 is a genuine held View/Share state rather than a short pulse. In DS4 mode Menu + L3 mirrors that behavior for the physical touchpad click; Xbox mode deliberately leaves Menu + L3 unchanged.
+
+### Xbox ↔ DualShock 4 spatial equivalence
+
+QuestPad follows the conventional positional mapping: `A ↔ Cross`, `B ↔ Circle`, `X ↔ Square`, `Y ↔ Triangle`, `LB/RB ↔ L1/R1`, `LT/RT ↔ L2/R2`, `View/Back ↔ Share`, `Menu/Start ↔ Options`, and `Guide/Xbox ↔ PS Home`. D-pad directions, sticks and L3/R3 map directly. Counting the four D-pad directions separately and L2/R2 as pressable triggers, this exposes all 18 pressable DS4 controls; only touch-surface coordinates are intentionally not emulated.
 
 ## Native gyro
 
