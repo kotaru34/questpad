@@ -152,9 +152,15 @@ public:
     void stop() {
         if (!running_.exchange(false)) return;
         int listen = listenFd_.exchange(-1);
-        if (listen >= 0) close(listen);
+        if (listen >= 0) {
+            shutdown(listen, SHUT_RDWR);
+            close(listen);
+        }
         int client = clientFd_.exchange(-1);
-        if (client >= 0) close(client);
+        if (client >= 0) {
+            shutdown(client, SHUT_RDWR);
+            close(client);
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -744,6 +750,11 @@ void android_main(android_app* app) {
                 focused = changed->state == XR_SESSION_STATE_FOCUSED;
                 LOGI("XR session state -> %d", static_cast<int>(changed->state));
                 if (changed->state == XR_SESSION_STATE_STOPPING && sessionActive) {
+                    setHaptic(session, actions.lHaptic, 0);
+                    setHaptic(session, actions.rHaptic, 0);
+                    lastRumble = 0;
+                    exitPulseStrength = 0;
+                    nextHapticRefresh = 0;
                     passthrough.setEnabled(false, app->activity);
                     XrResult endSessionResult = xrEndSession(session);
                     if (XR_FAILED(endSessionResult)) xrOk(instance, endSessionResult, "xrEndSession");
@@ -755,6 +766,8 @@ void android_main(android_app* app) {
             }
             event = {XR_TYPE_EVENT_DATA_BUFFER};
         }
+
+        if (quit || app->destroyRequested) break;
 
         if (!sessionActive && resumed && sessionState == XR_SESSION_STATE_READY) {
             XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO}; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -775,6 +788,17 @@ void android_main(android_app* app) {
                 xrOk(instance, beginSessionResult, "xrBeginSession");
             }
         }
+
+        // Android owns the application lifecycle. After the exit chord requests
+        // NativeActivity.finish(), keep pumping Android/OpenXR lifecycle events but do
+        // not enter xrWaitFrame again: a runtime that has begun pausing the Activity may
+        // no longer schedule another frame, which can otherwise deadlock the command
+        // pipe and surface as an Android "app isn't responding" dialog.
+        if (exitRequested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
         if (!sessionActive) continue;
 
         XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO}; XrFrameState fs{XR_TYPE_FRAME_STATE};
@@ -794,6 +818,7 @@ void android_main(android_app* app) {
             continue;
         }
 
+        bool finishActivityAfterFrame = false;
         FeedbackState feedback = bridge.pollFeedback();
         uint16_t motionRequest = feedback.control & 0x3u;
         bool wantPassthrough = (feedback.control & kControlPassthrough) != 0;
@@ -893,12 +918,24 @@ void android_main(android_app* app) {
                 if (held >= 1'000'000'000ULL) cue(1, 80);
                 if (held >= 2'000'000'000ULL) cue(2, 150);
                 if (held >= kExitHoldNs && !exitRequested) {
-                    cue(3, 255); packet = PadPacket{}; packet.magic = kMagic; packet.version = kProtocolVersion;
-                    packet.size = sizeof(PadPacket); packet.sequence = sequence++; packet.monotonicNs = monoNs(); packet.thermalStatus = thermal;
+                    cue(3, 255);
+                    packet = PadPacket{};
+                    packet.magic = kMagic;
+                    packet.version = kProtocolVersion;
+                    packet.size = sizeof(PadPacket);
+                    packet.sequence = sequence++;
+                    packet.monotonicNs = monoNs();
+                    packet.thermalStatus = thermal;
+
+                    // On Android the Activity lifecycle owns session teardown. Khronos'
+                    // Android hello_xr follows the same pattern: request Activity finish
+                    // rather than relying on xrRequestExitSession to close NativeActivity.
+                    // Disable passthrough immediately and send one neutral packet first.
+                    exitRequested = true;
+                    passthrough.setEnabled(false, app->activity);
                     if (passthrough.available()) packet.flags |= FLAG_PASSTHROUGH_AVAILABLE;
                     if (passthrough.active()) packet.flags |= FLAG_PASSTHROUGH_ACTIVE;
-                    exitRequested = true;
-                    if (XR_FAILED(xrRequestExitSession(session))) quit = true;
+                    finishActivityAfterFrame = true;
                 }
             } else { exitStartNs = 0; exitPulseStage = 0; }
         }
@@ -940,12 +977,24 @@ void android_main(android_app* app) {
             xrOk(instance, endFrameResult, "xrEndFrame");
             passthrough.disableAfterFrameError(app->activity);
         }
+
+        if (finishActivityAfterFrame) {
+            LOGI("exit chord completed; finishing Android NativeActivity");
+            ANativeActivity_finish(app->activity);
+        }
     }
 
-    setHaptic(session, actions.lHaptic, 0); setHaptic(session, actions.rHaptic, 0);
+    if (sessionActive) {
+        setHaptic(session, actions.lHaptic, 0);
+        setHaptic(session, actions.rHaptic, 0);
+    }
     bridge.stop();
     passthrough.destroy(app->activity);
-    if (sessionActive) xrEndSession(session);
+    if (sessionActive && sessionState == XR_SESSION_STATE_STOPPING) {
+        XrResult endSessionResult = xrEndSession(session);
+        if (XR_FAILED(endSessionResult)) xrOk(instance, endSessionResult, "xrEndSession during cleanup");
+        sessionActive = false;
+    }
     if (leftSpace != XR_NULL_HANDLE) xrDestroySpace(leftSpace);
     if (rightSpace != XR_NULL_HANDLE) xrDestroySpace(rightSpace);
     if (localSpace != XR_NULL_HANDLE) xrDestroySpace(localSpace);
