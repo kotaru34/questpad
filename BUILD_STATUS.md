@@ -1,6 +1,6 @@
 # Project status
 
-QuestPad is functional on real Quest 3 hardware and is in active public testing. The original Xbox/XInput gamepad path remains the stable baseline. Right-Touch DS4 gyro has now completed useful real-game A/B testing, while the new MR passthrough view needs integrated hardware validation.
+QuestPad is functional on real Quest 3 hardware and is in active public testing. The original Xbox/XInput gamepad path remains the stable baseline. Right-Touch DS4 gyro has completed extended real-game validation, with Angular-rate-only established as the preferred gameplay path. The v0.3.2 diagnostic passthrough hardening also fixed the Quest app exit that occurred when MR mode was first enabled; passthrough now activates and displays normally on hardware.
 
 ## Verified on hardware — baseline
 
@@ -35,16 +35,19 @@ Implemented:
 - Recommended Angular-rate-only path using controller-local OpenXR angular velocity.
 - Camera-assisted tracked-pose derivative retained only as a diagnostic A/B path.
 - Adaptive Windows-side smoothing: Off / Light / Medium / Strong.
+- Optional host-side right-stick gyro lock with immediate frame-level engage/release, radial `0.12 / 0.08` hysteresis and no time debounce.
+- Stick lock keeps Quest angular-rate acquisition running and resets the Windows gyro smoothing state while locked, so unlock can resume on the next input frame without a stale-filter kick.
 
 Observed on hardware/gameplay:
 
 - Both integrated gyro modes produce usable motion input.
-- Angular-rate-only feels better/more accurate than the camera-assisted path and is now the recommended mode.
+- Extended gameplay sessions confirm Angular-rate-only is the better aiming path; adding optical tracked-pose derivation introduces extra noise/variability rather than improving control.
 - Adaptive smoothing is clearly useful for real hand tremor during precise aiming and is being kept as-is.
 - Angular-rate-only remains usable outside Quest camera FOV after Horizon's one-time post-reboot acquisition.
 
 Still worth validating more broadly:
 
+- Hardware feel of the new right-stick gyro lock across games that mix stick and gyro aiming.
 - DS4 gyro scale/sign behaviour across several native-motion PC games.
 - Long-session latency and thermal comparison with gyro Off.
 - Per-game interaction with games that already apply their own gyro filtering.
@@ -60,26 +63,31 @@ This is the established default and thermal baseline:
 - minimum Android window brightness override;
 - motion acquisition only when the host requests it.
 
-### Passthrough / MR — implemented, awaiting hardware test
+### Passthrough / MR — activation verified on Quest 3
 
-v0.3.1 adds optional `XR_FB_passthrough` support:
+The passthrough path uses optional `XR_FB_passthrough` support:
 
 - host-controlled `Black / zero-layer` vs `Passthrough / MR` toggle;
-- lazy creation of a reconstruction passthrough feature/layer;
+- passthrough feature/layer objects are pre-created during initialization and kept paused until requested, matching the hardened v0.3.2 diagnostic lifecycle;
 - one compositor passthrough layer when active, still with no eye swapchains or Quest-rendered scene;
+- passthrough composition is omitted when OpenXR reports `shouldRender == XR_FALSE`;
 - no raw camera-frame API or camera permission;
 - normal/system display brightness while passthrough is active;
 - passthrough paused and minimum brightness restored when the mode is disabled;
 - host disconnect clears the passthrough request and returns QuestPad to zero-layer mode;
 - availability/active state reported back to the Windows tray through unused protocol-v2 flag bits.
 
-Hardware validation targets:
+Hardware result:
 
-- confirm the full-room passthrough layer displays correctly on Quest 3;
-- toggle repeatedly between Black and Passthrough without losing controller focus/transport;
-- verify coexistence with the user's Mixed Reality Link / Windows App multitasking workflow;
+- the earlier failure where enabling MR made QuestPad appear briefly and then close is fixed by the v0.3.2 diagnostic lifecycle hardening;
+- passthrough now activates and displays normally on the Quest 3 development headset.
+
+Remaining soak/interaction targets:
+
+- toggle repeatedly between Black and Passthrough over long sessions;
+- verify coexistence/focus transitions with the Mixed Reality Link / Windows App multitasking workflow;
 - compare Android thermal state, battery temperature and practical headset warmth between modes;
-- confirm Windows-host disconnect always returns the Quest app to black/zero-layer mode.
+- confirm Windows-host disconnect always returns the Quest app to black/zero-layer mode during extended use.
 
 ## Steering decision
 
@@ -102,8 +110,8 @@ The old Free-air and Hybrid prototypes remain internal legacy code for now but a
 Current priorities are now:
 
 1. Preserve and soak-test the stable Xbox/gamepad baseline.
-2. Polish Angular-rate DS4 gyro and smoothing.
-3. Validate the optional MR passthrough view without compromising the zero-layer baseline.
+2. Keep Angular-rate DS4 gyro as the production motion path and polish gameplay ergonomics such as the optional right-stick lock.
+3. Soak-test the now-functional MR passthrough mode without compromising the zero-layer baseline.
 4. Keep the mounted steering prototype isolated and experimental rather than expanding it.
 
 ## Stability target

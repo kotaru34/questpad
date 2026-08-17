@@ -12,8 +12,9 @@ The design priorities are low latency, low Quest-side thermal load, reliable sys
 - ~72 Hz Quest sampling and USB/ADB TCP transport with `TCP_NODELAY`.
 - Xbox 360/XInput backend for broad game compatibility.
 - DualShock 4 backend with native right-Touch gyro.
-- **Angular-rate gyro is the recommended motion path** after real hardware A/B testing.
+- **Angular-rate gyro is the recommended motion path** after extended real-hardware gameplay testing.
 - Adaptive Windows-side gyro smoothing: Off / Light / Medium / Strong.
+- Optional instant **right-stick gyro lock** with no time debounce; Quest motion acquisition stays active so gyro resumes on the next input frame.
 - Two Quest view modes:
   - **Black / zero-layer** — default PC-only, minimum-workload mode.
   - **Passthrough / MR** — optional `XR_FB_passthrough` compositor layer so the physical room remains visible around other Quest windows.
@@ -106,7 +107,7 @@ Tray:
 
 QuestPad consumes the right controller's OpenXR angular-velocity stream and forwards controller-local angular rate to the DS4 motion report. Windows does not consume absolute controller orientation or position for this mode.
 
-Real Quest 3 A/B testing found this path better for aiming than the camera-assisted derivative path, including when the controller is outside headset camera FOV.
+Extended Quest 3 gameplay testing found this path better for aiming than the camera-assisted derivative path. Adding optical tracked-pose derivation introduced extra noise and variability rather than improving control, while Angular-rate-only remained usable when the controller was outside headset camera FOV.
 
 This is **not raw physical MEMS access**: public OpenXR does not expose the Touch Plus gyroscope directly, so Horizon may still perform internal sensor fusion.
 
@@ -128,6 +129,24 @@ QuestPad provides Off / Light / Medium / Strong adaptive smoothing. It runs on W
 
 If a game already has excellent native gyro filtering, `Off` avoids double filtering.
 
+### Optional right-stick gyro lock
+
+Tray:
+
+`Lock gyro while using right stick`
+
+This option is **off by default**. When enabled, QuestPad suppresses gyro in the same input frame that the raw right-stick magnitude crosses the engage threshold. There is no timer or debounce: the only added delay is the normal input cadence.
+
+The detector is radial and uses hysteresis (`0.12` engage / `0.08` release) so ordinary stick drift near the mapper's deadzone cannot flap the lock state. While locked, QuestPad resets the Windows gyro smoothing state instead of accumulating hidden filtered motion.
+
+The lock is host-side only. Quest continues to stream the requested angular-rate data, so releasing the stick can resume gyro on the next received input frame without an OpenXR mode transition or motion reacquisition.
+
+CLI equivalent:
+
+```powershell
+.\QuestPad.Host.Console.exe --gyro rate --gyro-stick-lock on
+```
+
 ## Quest view modes
 
 The Quest view mode is independent from the controller backend and gyro mode.
@@ -148,7 +167,9 @@ Tray:
 
 QuestPad uses `XR_FB_passthrough` to submit a single full-room reconstruction passthrough compositor layer. It does **not** ask for raw camera frames and still renders no scene or eye swapchains. When enabled, QuestPad restores normal/system display brightness so the room is actually visible.
 
-When passthrough is disabled — or the Windows bridge disconnects — the passthrough feature/layer is paused and QuestPad returns to the zero-layer, minimum-brightness baseline. Passthrough objects are created lazily on first use.
+The hardened v0.3.2 lifecycle pre-creates the passthrough feature/layer during OpenXR initialization and keeps them paused until requested. Composition is submitted only while the runtime reports `shouldRender == XR_TRUE`. When passthrough is disabled — or the Windows bridge disconnects — the layer is paused and QuestPad returns to the zero-layer, minimum-brightness baseline.
+
+The first MR implementation could make QuestPad appear for roughly a second and then close when passthrough was activated. The v0.3.2 diagnostic lifecycle/JNI hardening fixed that failure on the development Quest 3, and passthrough now activates and displays normally on hardware.
 
 The Windows tray reports one of:
 
@@ -211,6 +232,7 @@ There is no active plan to expand this into a full wheel subsystem. The code rem
 - Quest view: Black / Passthrough;
 - Xbox 360 / DS4 output backend;
 - gyro source, validity and smoothing;
+- optional right-stick gyro lock;
 - limited mounted-steering experiment;
 - controller batteries and source;
 - Android thermal state and Quest battery temperature;
@@ -228,6 +250,7 @@ There is no active plan to expand this into a full wheel subsystem. The code rem
 --output xbox|ds4
 --gyro off|rate|camera
 --gyro-smoothing off|light|medium|strong
+--gyro-stick-lock on|off
 --steering off|mounted
 --steering-range DEG
 --steering-smoothing off|light|medium|strong
@@ -245,6 +268,9 @@ Examples:
 ```powershell
 # Recommended native gyro + light tremor filtering
 .\QuestPad.Host.Console.exe --gyro rate --gyro-smoothing light
+
+# Recommended gyro, but suppress it instantly while manually using the right stick
+.\QuestPad.Host.Console.exe --gyro rate --gyro-smoothing light --gyro-stick-lock on
 
 # MR view with native gyro
 .\QuestPad.Host.Console.exe --quest-view passthrough --gyro rate --gyro-smoothing light
@@ -271,6 +297,7 @@ Controller battery percentage prefers `XR_EXT_interaction_profile_battery_state_
 - Host disconnect also removes the passthrough request, returning QuestPad to zero-layer mode.
 - Tray pause -> neutral controller and rumble off while transport stays alive.
 - Stale gyro is never repeated as a valid sample.
+- Right-stick gyro lock suppresses output without stopping Quest motion acquisition and clears smoothing state while locked.
 - Exit gesture neutralizes before requesting OpenXR exit.
 - Quest TCP server remains loopback-only and is reached through ADB forwarding.
 
@@ -292,13 +319,14 @@ QuestPad Quest app
 Windows logical processing
   - ControllerMapper
   - MotionProcessor + adaptive smoothing
+  - optional host-side right-stick gyro lock
   - limited SteeringEstimator experiment
         |
         +--> Xbox360Backend
         `--> DualShock4Backend + native gyro
 ```
 
-Passthrough is a Quest compositor/view concern; it does not change the controller packet cadence or virtual-controller mapping.
+Passthrough is a Quest compositor/view concern; it does not change the controller packet cadence or virtual-controller mapping. The right-stick gyro lock is entirely host-side and likewise does not change protocol v2.
 
 ## Building
 
