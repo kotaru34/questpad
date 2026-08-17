@@ -717,6 +717,7 @@ void android_main(android_app* app) {
     int thermal = -1;
     uint32_t batteryPacked = 0;
     uint16_t lastRumble = 0;
+    bool lastShouldRender = true;
 
     app->userData = &resumed;
     app->onAppCmd = [](android_app* a, int32_t cmd) {
@@ -724,6 +725,7 @@ void android_main(android_app* app) {
         if (!r) return;
         if (cmd == APP_CMD_RESUME) *r = true;
         if (cmd == APP_CMD_PAUSE || cmd == APP_CMD_STOP) *r = false;
+        LOGI("Android app cmd=%d resumed=%d", cmd, *r ? 1 : 0);
     };
 
     while (!quit && !app->destroyRequested) {
@@ -740,17 +742,24 @@ void android_main(android_app* app) {
                 auto* changed = reinterpret_cast<XrEventDataSessionStateChanged*>(&event);
                 sessionState = changed->state;
                 focused = changed->state == XR_SESSION_STATE_FOCUSED;
+                LOGI("XR session state -> %d", static_cast<int>(changed->state));
                 if (changed->state == XR_SESSION_STATE_STOPPING && sessionActive) {
                     passthrough.setEnabled(false, app->activity);
-                    xrEndSession(session); sessionActive = false; focused = false;
-                } else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING) quit = true;
+                    XrResult endSessionResult = xrEndSession(session);
+                    if (XR_FAILED(endSessionResult)) xrOk(instance, endSessionResult, "xrEndSession");
+                    sessionActive = false; focused = false;
+                } else if (changed->state == XR_SESSION_STATE_EXITING || changed->state == XR_SESSION_STATE_LOSS_PENDING) {
+                    LOGW("XR runtime requested app exit/loss: state=%d", static_cast<int>(changed->state));
+                    quit = true;
+                }
             }
             event = {XR_TYPE_EVENT_DATA_BUFFER};
         }
 
         if (!sessionActive && resumed && sessionState == XR_SESSION_STATE_READY) {
             XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO}; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-            if (XR_SUCCEEDED(xrBeginSession(session, &bi))) {
+            XrResult beginSessionResult = xrBeginSession(session, &bi);
+            if (XR_SUCCEEDED(beginSessionResult)) {
                 sessionActive = true;
                 LOGI("XR session active");
                 if (perfExt) {
@@ -762,13 +771,28 @@ void android_main(android_app* app) {
                     }
                 }
                 if (refreshExt) requestLowRefreshRate(instance, session);
+            } else {
+                xrOk(instance, beginSessionResult, "xrBeginSession");
             }
         }
         if (!sessionActive) continue;
 
         XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO}; XrFrameState fs{XR_TYPE_FRAME_STATE};
-        if (XR_FAILED(xrWaitFrame(session, &wi, &fs))) continue;
-        XrFrameBeginInfo fi{XR_TYPE_FRAME_BEGIN_INFO}; if (XR_FAILED(xrBeginFrame(session, &fi))) continue;
+        XrResult waitResult = xrWaitFrame(session, &wi, &fs);
+        if (XR_FAILED(waitResult)) {
+            xrOk(instance, waitResult, "xrWaitFrame");
+            continue;
+        }
+        if ((fs.shouldRender == XR_TRUE) != lastShouldRender) {
+            lastShouldRender = fs.shouldRender == XR_TRUE;
+            LOGI("XR shouldRender -> %d", lastShouldRender ? 1 : 0);
+        }
+        XrFrameBeginInfo fi{XR_TYPE_FRAME_BEGIN_INFO};
+        XrResult beginFrameResult = xrBeginFrame(session, &fi);
+        if (XR_FAILED(beginFrameResult)) {
+            xrOk(instance, beginFrameResult, "xrBeginFrame");
+            continue;
+        }
 
         FeedbackState feedback = bridge.pollFeedback();
         uint16_t motionRequest = feedback.control & 0x3u;
@@ -897,7 +921,12 @@ void android_main(android_app* app) {
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
         ei.displayTime = fs.predictedDisplayTime;
         ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        const XrCompositionLayerBaseHeader* passthroughLayer = passthrough.compositionLayer();
+
+        // OpenXR explicitly recommends omitting composition layers whenever
+        // XrFrameState::shouldRender is XR_FALSE. This matters especially during
+        // system-UI / multitasking transitions, exactly the path MR Link exercises.
+        const XrCompositionLayerBaseHeader* passthroughLayer =
+            fs.shouldRender == XR_TRUE ? passthrough.compositionLayer() : nullptr;
         if (passthroughLayer) {
             ei.layerCount = 1;
             ei.layers = &passthroughLayer;
@@ -905,7 +934,12 @@ void android_main(android_app* app) {
             ei.layerCount = 0;
             ei.layers = nullptr;
         }
-        xrEndFrame(session, &ei);
+
+        XrResult endFrameResult = xrEndFrame(session, &ei);
+        if (XR_FAILED(endFrameResult)) {
+            xrOk(instance, endFrameResult, "xrEndFrame");
+            passthrough.disableAfterFrameError(app->activity);
+        }
     }
 
     setHaptic(session, actions.lHaptic, 0); setHaptic(session, actions.rHaptic, 0);
