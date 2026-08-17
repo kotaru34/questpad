@@ -94,10 +94,18 @@ public:
         if (enabled) {
             if (!ensureCreated()) {
                 available_ = false;
+                setWindowBrightness(activity, 0.0f);
                 return;
             }
 
-            if (XR_FAILED(startPassthrough_(passthrough_)) || XR_FAILED(resumeLayer_(layer_))) {
+            if (XR_FAILED(startPassthrough_(passthrough_))) {
+                available_ = false;
+                active_ = false;
+                setWindowBrightness(activity, 0.0f);
+                return;
+            }
+            if (XR_FAILED(resumeLayer_(layer_))) {
+                pausePassthrough_(passthrough_);
                 available_ = false;
                 active_ = false;
                 setWindowBrightness(activity, 0.0f);
