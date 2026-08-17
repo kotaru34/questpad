@@ -125,6 +125,7 @@ internal sealed class TrayStatus : IDisposable
     private readonly HostStatus _status;
     private readonly RuntimeSettings _settings;
     private readonly Action _calibrateSteering;
+    private readonly Action _disarmSteering;
     private readonly Action<bool> _setPaused;
     private readonly Action _exit;
     private readonly Thread _thread;
@@ -139,12 +140,14 @@ internal sealed class TrayStatus : IDisposable
         HostStatus status,
         RuntimeSettings settings,
         Action calibrateSteering,
+        Action disarmSteering,
         Action<bool> setPaused,
         Action exit)
     {
         _status = status;
         _settings = settings;
         _calibrateSteering = calibrateSteering;
+        _disarmSteering = disarmSteering;
         _setPaused = setPaused;
         _exit = exit;
         _thread = new Thread(Run) { IsBackground = true, Name = "QuestPad tray" };
@@ -178,9 +181,9 @@ internal sealed class TrayStatus : IDisposable
 
         var gyroMenu = new ToolStripMenuItem("Gyro source (right Touch)");
         var gyroOff = CheckItem("Off", () => _settings.SetGyroSource(GyroSourceMode.Off));
-        var gyroCamera = CheckItem("Camera-assisted tracked pose", () => _settings.SetGyroSource(GyroSourceMode.CameraAssisted));
-        var gyroRate = CheckItem("Angular-rate only (no optical data consumed)", () => _settings.SetGyroSource(GyroSourceMode.AngularRate));
-        gyroMenu.DropDownItems.AddRange(new ToolStripItem[] { gyroOff, gyroCamera, gyroRate });
+        var gyroRate = CheckItem("Angular-rate only (recommended)", () => _settings.SetGyroSource(GyroSourceMode.AngularRate));
+        var gyroCamera = CheckItem("Camera-assisted tracked pose (experimental A/B)", () => _settings.SetGyroSource(GyroSourceMode.CameraAssisted));
+        gyroMenu.DropDownItems.AddRange(new ToolStripItem[] { gyroOff, gyroRate, gyroCamera });
 
         var gyroSmooth = new ToolStripMenuItem("Gyro smoothing");
         var gsOff = CheckItem("Off", () => _settings.SetGyroSmoothing(SmoothingLevel.Off));
@@ -189,11 +192,11 @@ internal sealed class TrayStatus : IDisposable
         var gsStrong = CheckItem("Strong", () => _settings.SetGyroSmoothing(SmoothingLevel.Strong));
         gyroSmooth.DropDownItems.AddRange(new ToolStripItem[] { gsOff, gsLight, gsMedium, gsStrong });
 
-        var steeringMenu = new ToolStripMenuItem("Steering wheel mode");
+        var steeringMenu = new ToolStripMenuItem("Steering wheel mode (experimental)");
         var stOff = CheckItem("Off", () => _settings.SetSteering(SteeringMode.Off));
         var stMounted = CheckItem("Mounted / rigid wheel", () => _settings.SetSteering(SteeringMode.Mounted));
         var stFree = CheckItem("Free-air optical wheel", () => _settings.SetSteering(SteeringMode.FreeAir));
-        var stHybrid = CheckItem("Hybrid / auto fallback", () => _settings.SetSteering(SteeringMode.Hybrid));
+        var stHybrid = CheckItem("Hybrid / optical + rigid fallback", () => _settings.SetSteering(SteeringMode.Hybrid));
         steeringMenu.DropDownItems.AddRange(new ToolStripItem[] { stOff, stMounted, stFree, stHybrid });
 
         var steeringRange = new ToolStripMenuItem("Steering range");
@@ -202,8 +205,28 @@ internal sealed class TrayStatus : IDisposable
         var range360 = CheckItem("360° total", () => _settings.SetSteeringRange(360));
         steeringRange.DropDownItems.AddRange(new ToolStripItem[] { range180, range240, range360 });
 
-        var calibrate = new ToolStripMenuItem("Calibrate steering center");
+        var steeringSmooth = new ToolStripMenuItem("Steering smoothing");
+        var ssOff = CheckItem("Off", () => _settings.SetSteeringSmoothing(SmoothingLevel.Off));
+        var ssLight = CheckItem("Light", () => _settings.SetSteeringSmoothing(SmoothingLevel.Light));
+        var ssMedium = CheckItem("Medium", () => _settings.SetSteeringSmoothing(SmoothingLevel.Medium));
+        var ssStrong = CheckItem("Strong", () => _settings.SetSteeringSmoothing(SmoothingLevel.Strong));
+        steeringSmooth.DropDownItems.AddRange(new ToolStripItem[] { ssOff, ssLight, ssMedium, ssStrong });
+
+        var gripClutch = CheckItem("Steering light-grip clutch (recommended)", () =>
+        {
+            RuntimeSettingsSnapshot cfg = _settings.Snapshot();
+            _settings.SetSteeringGripClutch(!cfg.SteeringGripClutch);
+        });
+        var invertSteering = CheckItem("Invert steering direction", () =>
+        {
+            RuntimeSettingsSnapshot cfg = _settings.Snapshot();
+            _settings.SetSteeringInverted(!cfg.SteeringInverted);
+        });
+
+        var calibrate = new ToolStripMenuItem("Center + arm steering");
         calibrate.Click += (_, _) => _calibrateSteering();
+        var disarm = new ToolStripMenuItem("Disarm steering now");
+        disarm.Click += (_, _) => _disarmSteering();
 
         var pause = new ToolStripMenuItem("Pause gamepad output") { CheckOnClick = true };
         pause.CheckedChanged += (_, _) => _setPaused(pause.Checked);
@@ -215,7 +238,8 @@ internal sealed class TrayStatus : IDisposable
         {
             title, new ToolStripSeparator(), connection, gamepad, outputStatus, gyroStatus, steeringStatus,
             leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
-            new ToolStripSeparator(), outputMenu, gyroMenu, gyroSmooth, steeringMenu, steeringRange, calibrate,
+            new ToolStripSeparator(), outputMenu, gyroMenu, gyroSmooth,
+            steeringMenu, steeringRange, steeringSmooth, gripClutch, invertSteering, calibrate, disarm,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
 
@@ -250,8 +274,8 @@ internal sealed class TrayStatus : IDisposable
             outputXbox.Checked = cfg.Output == OutputMode.Xbox360;
             outputDs4.Checked = cfg.Output == OutputMode.DualShock4;
             gyroOff.Checked = cfg.GyroSource == GyroSourceMode.Off;
-            gyroCamera.Checked = cfg.GyroSource == GyroSourceMode.CameraAssisted;
             gyroRate.Checked = cfg.GyroSource == GyroSourceMode.AngularRate;
+            gyroCamera.Checked = cfg.GyroSource == GyroSourceMode.CameraAssisted;
             gsOff.Checked = cfg.GyroSmoothing == SmoothingLevel.Off;
             gsLight.Checked = cfg.GyroSmoothing == SmoothingLevel.Light;
             gsMedium.Checked = cfg.GyroSmoothing == SmoothingLevel.Medium;
@@ -263,10 +287,19 @@ internal sealed class TrayStatus : IDisposable
             range180.Checked = Math.Abs(cfg.SteeringRangeDegrees - 180) < 1;
             range240.Checked = Math.Abs(cfg.SteeringRangeDegrees - 240) < 1;
             range360.Checked = Math.Abs(cfg.SteeringRangeDegrees - 360) < 1;
+            ssOff.Checked = cfg.SteeringSmoothing == SmoothingLevel.Off;
+            ssLight.Checked = cfg.SteeringSmoothing == SmoothingLevel.Light;
+            ssMedium.Checked = cfg.SteeringSmoothing == SmoothingLevel.Medium;
+            ssStrong.Checked = cfg.SteeringSmoothing == SmoothingLevel.Strong;
+            gripClutch.Checked = cfg.SteeringGripClutch;
+            invertSteering.Checked = cfg.SteeringInverted;
 
             if (pause.Checked != s.GamepadPaused) pause.Checked = s.GamepadPaused;
             pause.Enabled = s.GamepadAvailable;
             calibrate.Enabled = s.Connected && cfg.Steering != SteeringMode.Off;
+            disarm.Enabled = cfg.Steering != SteeringMode.Off;
+            gripClutch.Enabled = cfg.Steering != SteeringMode.Off;
+            invertSteering.Enabled = cfg.Steering != SteeringMode.Off;
 
             string state = !s.Connected ? "waiting" : s.GamepadPaused ? "paused" : "connected";
             string text = $"QuestPad — {state} — {s.OutputBackend} — L {BatteryText(s.LeftBattery)} R {BatteryText(s.RightBattery)}";
