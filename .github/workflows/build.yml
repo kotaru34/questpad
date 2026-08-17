@@ -2,7 +2,7 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main, agent/gyro-right-stick-lock ]
+    branches: [ main ]
 
 jobs:
   quest-apk:
