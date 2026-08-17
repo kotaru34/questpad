@@ -2,7 +2,7 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, agent/session-polish ]
 
 jobs:
   quest-apk:
@@ -51,8 +51,6 @@ jobs:
         shell: pwsh
         run: |
           Push-Location dist/package
-          # Touch one persistent setting before --help so RuntimeSettings is
-          # intentionally initialized; a pure --help path need not construct it.
           & .\QuestPad.Host.Console.exe --quest-view black --help | Out-Null
           if (!(Test-Path .\QuestPad.settings.json)) {
             throw "QuestPad.settings.json was not created next to the executable"
