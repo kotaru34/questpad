@@ -55,7 +55,7 @@ internal static class AdbQuestDeviceSelector
                 error =
                     $"ADB device '{requested.Serial}' does not look like a supported Meta Quest. " +
                     $"Model='{probe.Model}', manufacturer='{probe.Manufacturer}'. " +
-                    "QuestPad requires Android VR headtracking plus the Quest/Meta runtime signature.";
+                    "QuestPad accepts an explicit Quest model identity, or a Meta/Oculus device exposing Quest VR capabilities.";
                 return false;
             }
 
@@ -104,7 +104,7 @@ internal static class AdbQuestDeviceSelector
         }
 
         error =
-            "ADB devices are connected, but none passed the Meta Quest capability check. " +
+            "ADB devices are connected, but none passed the Meta Quest identity/capability check. " +
             "A phone will not be used as the QuestPad transport target.\n" + DescribeDevices(devices);
         return false;
     }
@@ -146,8 +146,19 @@ internal static class AdbQuestDeviceSelector
 
         bool hasHeadtracking = featureText.Contains(HeadtrackingFeature, StringComparison.OrdinalIgnoreCase);
         bool hasOculusPassthrough = featureText.Contains(OculusPassthroughFeature, StringComparison.OrdinalIgnoreCase);
-        bool metaVendor = LooksMeta(manufacturer) || LooksMeta(brand) || LooksQuestDescription(listedDescription) || LooksQuestDescription(model);
-        bool isQuest = hasHeadtracking && (hasOculusPassthrough || metaVendor);
+
+        // Real Quest firmware does not consistently expose android.hardware.vr.headtracking
+        // through `pm list features`. ADB itself, however, reports explicit identities such
+        // as `model:Quest_3`, and ro.product.model does the same on current headsets. Treat
+        // an explicit Quest identity as authoritative instead of requiring a PackageManager
+        // feature that may be absent. For less explicit Meta/Oculus devices, still require a
+        // VR-specific feature so an unrelated Android device cannot be selected accidentally.
+        bool explicitQuestIdentity =
+            LooksQuestDescription(listedDescription) ||
+            LooksQuestDescription(model);
+        bool metaVendor = LooksMeta(manufacturer) || LooksMeta(brand);
+        bool isQuest = explicitQuestIdentity ||
+            (metaVendor && (hasHeadtracking || hasOculusPassthrough));
 
         CommandResult package = Run(adb, serial, "shell", "pm", "path", QuestPadPackage);
         bool installed = package.Success && package.Stdout.Contains("package:", StringComparison.OrdinalIgnoreCase);
