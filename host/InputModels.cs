@@ -37,7 +37,8 @@ internal readonly record struct RuntimeSettingsSnapshot(
     SmoothingLevel GyroSmoothing,
     SteeringMode Steering,
     SmoothingLevel SteeringSmoothing,
-    float SteeringRangeDegrees);
+    float SteeringRangeDegrees,
+    bool SteeringGripClutch);
 
 internal sealed class RuntimeSettings
 {
@@ -48,7 +49,8 @@ internal sealed class RuntimeSettings
         SmoothingLevel.Off,
         SteeringMode.Off,
         SmoothingLevel.Light,
-        240.0f);
+        240.0f,
+        false);
 
     public RuntimeSettingsSnapshot Snapshot()
     {
@@ -100,6 +102,11 @@ internal sealed class RuntimeSettings
     public void SetSteeringRange(float totalDegrees)
     {
         lock (gate) value = value with { SteeringRangeDegrees = Math.Clamp(totalDegrees, 60.0f, 1080.0f) };
+    }
+
+    public void SetSteeringGripClutch(bool enabled)
+    {
+        lock (gate) value = value with { SteeringGripClutch = enabled };
     }
 }
 
