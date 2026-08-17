@@ -65,8 +65,12 @@ internal sealed class AdbQuestBrightnessManager : IAsyncDisposable
                     ? EnterBlackMode()
                     : RestorePreferredBrightness();
 
-                if (ok)
-                    appliedView = desired;
+                // One ADB attempt per view transition. If a vendor command fails,
+                // do not hammer the USB/ADB path at polling frequency; the next
+                // transition (and shutdown recovery) gets another attempt.
+                appliedView = desired;
+                if (!ok)
+                    Console.Error.WriteLine("Quest brightness transition incomplete; will retry on the next view change or shutdown.");
             }
 
             try
