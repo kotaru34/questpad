@@ -18,7 +18,7 @@ internal sealed class ControllerMapper
     private const float DpadPress = 0.55f;
     private const float DpadRelease = 0.35f;
     private const float DpadIntent = 0.18f;
-    private const float GuideTriggerThreshold = 0.85f;
+    private const float GuideTriggerThreshold = 0.60f;
     private const double GuideHoldSeconds = 0.75;
     private const double MenuHoldSeconds = 0.50;
     private const int StartPulseFrames = 3;
@@ -69,6 +69,14 @@ internal sealed class ControllerMapper
         bool leftThumb = (buttons & BtnLThumb) != 0;
         bool rightThumb = (buttons & BtnRThumb) != 0;
 
+        // 0.4 physical layout:
+        //   Touch index triggers -> digital bumpers (LB/RB, L1/R1)
+        //   Touch grip analogs   -> analog triggers (LT/RT, L2/R2)
+        // The logical layer stays backend-independent, so Xbox and DS4 receive the
+        // same physical mapping automatically.
+        float logicalLt = Math.Clamp(lg, 0.0f, 1.0f);
+        float logicalRt = Math.Clamp(rg, 0.0f, 1.0f);
+
         if (menu && !menuWasDown)
         {
             menuDownTicks = nowTicks;
@@ -79,9 +87,9 @@ internal sealed class ControllerMapper
             ClearDpad();
         }
 
-        if (viewHoldActive && !rightThumb)
+        if (viewHoldActive && !leftThumb)
             viewHoldActive = false;
-        if (touchpadHoldActive && !leftThumb)
+        if (!enableDs4Extras || !rightThumb)
             touchpadHoldActive = false;
 
         bool view = viewHoldActive;
@@ -90,59 +98,76 @@ internal sealed class ControllerMapper
         bool startHeld = false;
         float outRx = rx;
         float outRy = ry;
-        float outLt = lt;
-        float outRt = rt;
+        float outLt = logicalLt;
+        float outRt = logicalRt;
         bool outLeftThumb = leftThumb;
         bool outRightThumb = rightThumb;
 
         if (menu)
         {
-            if (!startHoldActive && !menuUsed && menuDownTicks != 0 &&
-                SecondsSince(menuDownTicks, nowTicks) >= MenuHoldSeconds)
+            // Guide/PS has priority over the plain 0.50 s Menu hold. The old order
+            // could commit Start/Options before a human had finished squeezing both
+            // triggers, making Menu+LT+RT appear dead. Once both *logical* triggers
+            // (the Touch grips in the 0.4 layout) are present, cancel plain Menu and
+            // time the Guide chord independently.
+            bool guideChord = logicalLt >= GuideTriggerThreshold && logicalRt >= GuideTriggerThreshold;
+            if (guideChord)
             {
-                startHoldActive = true;
-            }
-
-            if (startHoldActive)
-            {
-                startHeld = true;
+                menuUsed = true;
+                startHoldActive = false;
+                startHeld = false;
+                ClearDpad();
+                outLt = outRt = 0.0f;
+                if (guideStartTicks == 0)
+                    guideStartTicks = nowTicks;
+                guide = SecondsSince(guideStartTicks, nowTicks) >= GuideHoldSeconds;
             }
             else
             {
-                if (Math.Abs(rx) >= DpadIntent || Math.Abs(ry) >= DpadIntent)
-                    menuUsed = true;
+                guideStartTicks = 0;
 
-                UpdateDpad(rx, ry);
-                outRx = outRy = 0.0f;
-
-                if (rightThumb)
+                if (!startHoldActive && !menuUsed && menuDownTicks != 0 &&
+                    SecondsSince(menuDownTicks, nowTicks) >= MenuHoldSeconds)
                 {
-                    viewHoldActive = true;
-                    view = true;
-                    outRightThumb = false;
-                    menuUsed = true;
+                    startHoldActive = true;
                 }
 
-                if (enableDs4Extras && leftThumb)
+                if (startHoldActive)
                 {
-                    touchpadHoldActive = true;
-                    touchpad = true;
-                    outLeftThumb = false;
-                    menuUsed = true;
-                }
-
-                bool guideChord = lt >= GuideTriggerThreshold && rt >= GuideTriggerThreshold;
-                if (guideChord)
-                {
-                    menuUsed = true;
-                    outLt = outRt = 0.0f;
-                    if (guideStartTicks == 0)
-                        guideStartTicks = nowTicks;
-                    guide = SecondsSince(guideStartTicks, nowTicks) >= GuideHoldSeconds;
+                    startHeld = true;
                 }
                 else
                 {
-                    guideStartTicks = 0;
+                    if (Math.Abs(rx) >= DpadIntent || Math.Abs(ry) >= DpadIntent)
+                        menuUsed = true;
+
+                    UpdateDpad(rx, ry);
+                    outRx = outRy = 0.0f;
+
+                    // User-tested 0.4 modifier placement:
+                    //   Menu+L3 -> View/Share
+                    //   Menu+R3 -> DS4 touchpad click
+                    if (leftThumb)
+                    {
+                        viewHoldActive = true;
+                        view = true;
+                        outLeftThumb = false;
+                        menuUsed = true;
+                    }
+
+                    if (rightThumb)
+                    {
+                        // Even in Xbox mode this is modifier intent, so do not emit
+                        // an accidental Start/Menu pulse when Menu is released. Xbox
+                        // has no touchpad, therefore R3 itself remains available there.
+                        menuUsed = true;
+                        if (enableDs4Extras)
+                        {
+                            touchpadHoldActive = true;
+                            touchpad = true;
+                            outRightThumb = false;
+                        }
+                    }
                 }
             }
         }
@@ -162,17 +187,20 @@ internal sealed class ControllerMapper
         if (viewHoldActive)
         {
             view = true;
-            outRightThumb = false;
+            outLeftThumb = false;
         }
-        if (touchpadHoldActive)
+        if (enableDs4Extras && touchpadHoldActive)
         {
             touchpad = true;
-            outLeftThumb = false;
+            outRightThumb = false;
         }
 
         menuWasDown = menu;
-        leftShoulder = Hysteresis(leftShoulder, lg, ShoulderPress, ShoulderRelease);
-        rightShoulder = Hysteresis(rightShoulder, rg, ShoulderPress, ShoulderRelease);
+
+        // The Touch index triggers are analog on the source side but bumpers are
+        // digital on both target layouts, so use hysteresis instead of a raw cutoff.
+        leftShoulder = Hysteresis(leftShoulder, lt, ShoulderPress, ShoulderRelease);
+        rightShoulder = Hysteresis(rightShoulder, rt, ShoulderPress, ShoulderRelease);
 
         var left = Radial(lx, ly);
         var right = Radial(outRx, outRy);
