@@ -326,6 +326,8 @@ internal readonly record struct MotionFrame(
 internal readonly record struct ProcessedMotion(
     bool GyroValid,
     Vector3 GyroRadiansPerSecond,
+    bool AccelerationValid,
+    Vector3 AccelerationG,
     bool SteeringValid,
     float SteeringNormalized,
     string SteeringState);
