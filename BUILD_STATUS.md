@@ -119,14 +119,26 @@ Hardware-verified on Quest 3:
 - The same bidirectional shutdown behaviour works while MR passthrough is active.
 - the named Windows single-instance guard correctly rejects a second host instance without disturbing the active bridge;
 
-New v0.3.7 recovery candidate, build-gated and awaiting the focused unplug/replug hardware retest:
+USB/ADB recovery is now hardware-verified on Quest 3:
 
-- unexpected USB/ADB loss still neutralizes output and **does not** quit either side;
-- the host now waits for the same selected Quest ADB serial instead of blindly retrying a stale localhost forward;
-- when that Quest returns, the host removes/recreates `tcp:38888` and retries the existing Quest bridge first;
-- the Quest app is relaunched only when autostart is enabled **and** its process is no longer running, avoiding unnecessary OpenXR-session restarts on ordinary cable reconnects.
+- unexpected physical USB/ADB loss neutralizes output and **does not** quit either side;
+- the host waits for the same selected Quest ADB serial instead of blindly retrying a stale localhost forward;
+- after replug, the host removes/recreates `tcp:38888` and reconnects to the already-running Quest bridge automatically;
+- the Quest OpenXR session is not restarted for an ordinary cable reconnect, and normal controller operation resumes without restarting either app;
+- the Quest app is relaunched only when autostart is enabled **and** its process is actually no longer running.
 - the Windows executables, tray and Quest launcher now share one QuestPad application mark.
 - Quest-side settings UI, user-selectable XR polling frequency and a manual session-restart menu were deliberately **not** added: the Windows tray is already the single control surface, ~72 Hz remains the validated low-load baseline, and normal watchdog/autostart recovery already covers the common restart case.
+
+### v0.4.0 mapping candidate
+
+Build-gated and awaiting the next Quest 3 real-game pass:
+
+- Touch index triggers now map to logical `LB/RB` and DS4 `L1/R1`;
+- Touch grip analogs now map to logical `LT/RT` and DS4 `L2/R2`;
+- `Menu + L3` is View/Share and `Menu + R3` is the DS4 touchpad click;
+- Guide/PS remains `Menu + LT + RT`, now using the grip-backed logical triggers;
+- Guide/PS preempts the 0.50-second plain Menu hold and uses a 0.60 trigger threshold plus its existing 0.75-second confirmation timer;
+- a permanent mapper smoke test reproduces the former timing-race scenario and verifies the new shoulder/trigger and L3/R3 modifier layout in CI.
 
 ## Architecture direction
 

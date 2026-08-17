@@ -78,10 +78,10 @@ For a real terminal and diagnostics:
 |---|---|
 | Left stick | Left Stick |
 | Right stick | Right Stick |
-| Left trigger | LT |
-| Right trigger | RT |
-| Left grip | LB |
-| Right grip | RB |
+| Left index trigger | LB |
+| Right index trigger | RB |
+| Left grip | LT (analog) |
+| Right grip | RT (analog) |
 | X / Y | X / Y |
 | A / B | A / B |
 | Left stick click | LS / L3 |
@@ -89,17 +89,19 @@ For a real terminal and diagnostics:
 | Tap left Menu | Start / Menu tap |
 | Hold left Menu alone for 0.50 s | held Start / Menu |
 | Menu + right stick | D-pad, including diagonals |
-| Menu + R3 | held Back / View |
-| Menu + L3 (DS4 only) | Touchpad click |
-| Menu + LT + RT for 0.75 s | Guide / PS |
+| Menu + L3 | held Back / View |
+| Menu + R3 (DS4 only) | Touchpad click |
+| Menu + both grips (logical LT + RT) for 0.75 s | Guide / PS |
 
 The Meta/System button remains Horizon-owned.
 
-On the DS4 backend the same physical locations map naturally to Cross/Circle/Square/Triangle, L1/R1, L2/R2, Options, Share and PS. `Menu + L3` adds the DS4 touchpad click without changing Xbox-mode behavior. See [MAPPING.md](MAPPING.md).
+The v0.4 layout uses Touch index triggers as `LB/RB → L1/R1` and the analog grip squeezes as `LT/RT → L2/R2`. Face-button correspondence remains `A→Cross`, `B→Circle`, `X→Square`, `Y→Triangle`. `Menu + L3` is View/Share, `Menu + R3` is the DS4 touchpad click, and Guide/PS remains `Menu + LT + RT`. See [MAPPING.md](MAPPING.md).
+
+Guide/PS has priority over the 0.50-second plain Menu hold. Once both logical triggers are present, QuestPad cancels Start/Options and starts the Guide chord's own 0.75-second timer; this fixes the earlier timing race where a slightly sequential three-button press could fail.
 
 ### Exit gesture
 
-Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` are the grip squeezes. Haptic cues occur at one second, two seconds and confirmation. This is an explicit *Exit QuestPad* action: the Quest app sends a final neutral/user-exit packet and the Windows host closes too. A normal USB/TCP dropout does **not** trigger this behaviour.
+Hold **both stick clicks + both physical grip squeezes** for **3 seconds**. In the v0.4 gamepad layout those grips are the controls mapped to logical `LT + RT` / DS4 `L2 + R2`. Haptic cues occur at one second, two seconds and confirmation. This is an explicit *Exit QuestPad* action: the Quest app sends a final neutral/user-exit packet and the Windows host closes too. A normal USB/TCP dropout does **not** trigger this behaviour.
 
 ## Native gyro
 
