@@ -44,6 +44,7 @@ Fixed-size **152-byte little-endian packets**, normally one per XR frame (~72 Hz
 - bit 4: exit chord armed
 - bit 5: `XR_FB_passthrough` is available and usable on this Quest/runtime
 - bit 6: QuestPad passthrough layer is currently active
+- bit 7: the Quest-side 3-second exit chord completed and the user explicitly requested full QuestPad shutdown
 
 Bits 5/6 let the host distinguish “requested but unavailable” from “requested and actually composited”.
 
@@ -101,20 +102,23 @@ Low two bits are the motion request:
 Independent feature bits:
 
 - bit 8 (`0x0100`): request Quest compositor passthrough
+- bit 9 (`0x0200`): request graceful QuestPad NativeActivity shutdown
 
-The host may combine bit 8 with any motion request. For example, angular-rate gyro + MR passthrough uses motion request `1` plus `0x0100`.
+The host may combine bit 8 with any motion request. For example, angular-rate gyro + MR passthrough uses motion request `1` plus `0x0100`. Bit 9 is terminal lifecycle control: the Quest side neutralizes input, disables passthrough, finishes the current XR frame and closes its NativeActivity.
 
-The host sends feedback/control whenever state changes and at least every 100 ms as a keepalive. If the Windows connection disappears, QuestPad sees a zero control word, disables passthrough and returns to its zero-layer/low-brightness baseline.
+The reverse direction is equally explicit. When the local 3-second exit chord completes, Quest sends one final neutral packet with status bit 7 before closing. Windows interprets only that flag as a user-requested remote exit; an EOF, watchdog or USB disconnect continues to mean *reconnect*, not *quit*.
+
+The host sends feedback/control whenever state changes and at least every 100 ms as a keepalive. If the Windows connection disappears unexpectedly, QuestPad sees a zero control word and disables passthrough; the Windows host keeps its existing reconnect behaviour. Black-mode physical display brightness is managed separately by the Windows ADB brightness manager, which snapshots/restores the Quest system brightness and keeps a portable crash-recovery file.
 
 ## Quest view modes
 
 ### Black / zero-layer
 
-Control bit 8 is clear. QuestPad submits **zero composition layers** and keeps its existing minimum-brightness override. This is the default PC-only / lowest-workload display mode.
+Control bit 8 is clear. QuestPad submits **zero composition layers**. This is the default PC-only / lowest-workload compositor mode. When the normal Windows host is in use, its ADB brightness manager independently forces the selected Quest display to minimum brightness and restores the captured system value/mode when leaving Black or shutting down.
 
 ### Passthrough / MR
 
-Control bit 8 is set. When `XR_FB_passthrough` is supported, QuestPad lazily creates a reconstruction passthrough feature/layer, starts/resumes it, restores normal/system display brightness, and submits exactly one `XrCompositionLayerPassthroughFB` as the backmost/only QuestPad composition layer.
+Control bit 8 is set. When `XR_FB_passthrough` is supported, QuestPad starts/resumes its pre-created reconstruction passthrough feature/layer and submits exactly one `XrCompositionLayerPassthroughFB` as the backmost/only QuestPad composition layer. The Windows ADB brightness manager restores the saved normal/system brightness for this mode.
 
 QuestPad does **not** request raw camera frames. Passthrough is owned by the OpenXR runtime/compositor.
 

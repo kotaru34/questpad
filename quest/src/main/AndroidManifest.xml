@@ -11,6 +11,8 @@
     <application
         android:allowBackup="false"
         android:hasCode="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="QuestPad"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 

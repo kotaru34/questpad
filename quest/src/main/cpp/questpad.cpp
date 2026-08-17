@@ -39,6 +39,7 @@ constexpr uint32_t kMagic = 0x44415051u; // QPAD little-endian
 constexpr uint32_t kFeedbackMagic = 0x31424651u; // QFB1 little-endian
 constexpr uint16_t kProtocolVersion = 2;
 constexpr uint16_t kControlPassthrough = 1u << 8;
+constexpr uint16_t kControlHostShutdown = 1u << 9;
 constexpr uint64_t kExitHoldNs = 3'000'000'000ULL;
 constexpr uint64_t kExitPulseNs = 125'000'000ULL;
 constexpr float kShoulderPressThreshold = 0.62f;
@@ -99,6 +100,7 @@ enum PacketFlags : uint32_t {
     FLAG_EXIT_ARMED = 1u << 4,
     FLAG_PASSTHROUGH_AVAILABLE = 1u << 5,
     FLAG_PASSTHROUGH_ACTIVE = 1u << 6,
+    FLAG_USER_EXIT_REQUESTED = 1u << 7,
 };
 
 enum Buttons : uint32_t {
@@ -662,7 +664,7 @@ void android_main(android_app* app) {
 
     XrInstanceCreateInfo ici{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(ici.applicationInfo.applicationName, "QuestPad", XR_MAX_APPLICATION_NAME_SIZE - 1);
-    ici.applicationInfo.applicationVersion = 4;
+    ici.applicationInfo.applicationVersion = 5;
     std::strncpy(ici.applicationInfo.engineName, "QuestPadNative", XR_MAX_ENGINE_NAME_SIZE - 1);
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
@@ -821,8 +823,14 @@ void android_main(android_app* app) {
         bool finishActivityAfterFrame = false;
         FeedbackState feedback = bridge.pollFeedback();
         uint16_t motionRequest = feedback.control & 0x3u;
-        bool wantPassthrough = (feedback.control & kControlPassthrough) != 0;
+        bool hostShutdownRequested = (feedback.control & kControlHostShutdown) != 0;
+        bool wantPassthrough = !hostShutdownRequested && (feedback.control & kControlPassthrough) != 0;
         passthrough.setEnabled(wantPassthrough, app->activity);
+        if (hostShutdownRequested && !exitRequested) {
+            LOGI("Windows host requested Quest bridge shutdown");
+            exitRequested = true;
+            finishActivityAfterFrame = true;
+        }
 
         PadPacket packet{};
         packet.magic = kMagic; packet.version = kProtocolVersion; packet.size = sizeof(PadPacket);
@@ -926,6 +934,7 @@ void android_main(android_app* app) {
                     packet.sequence = sequence++;
                     packet.monotonicNs = monoNs();
                     packet.thermalStatus = thermal;
+                    packet.flags |= FLAG_USER_EXIT_REQUESTED;
 
                     // On Android the Activity lifecycle owns session teardown. Khronos'
                     // Android hello_xr follows the same pattern: request Activity finish
@@ -979,7 +988,7 @@ void android_main(android_app* app) {
         }
 
         if (finishActivityAfterFrame) {
-            LOGI("exit chord completed; finishing Android NativeActivity");
+            LOGI("QuestPad shutdown requested; finishing Android NativeActivity");
             ANativeActivity_finish(app->activity);
         }
     }

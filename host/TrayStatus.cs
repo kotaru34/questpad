@@ -356,6 +356,17 @@ internal sealed class TrayStatus : IDisposable
 
     private static Icon CreateTrayIcon()
     {
+        try
+        {
+            string? executable = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(executable))
+            {
+                Icon? associated = Icon.ExtractAssociatedIcon(executable);
+                if (associated is not null) return associated;
+            }
+        }
+        catch { }
+
         using var bitmap = new Bitmap(32, 32);
         using (Graphics g = Graphics.FromImage(bitmap))
         {

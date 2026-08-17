@@ -16,6 +16,8 @@ internal static class Program
     private const int FeedbackSize = 8;
     private const uint FlagPassthroughAvailable = 1u << 5;
     private const uint FlagPassthroughActive = 1u << 6;
+    private const uint FlagQuestUserExitRequested = 1u << 7;
+    private const ushort ControlQuestShutdown = 1u << 9;
     private const float GyroStickLockEngage = 0.12f;
     private const float GyroStickLockRelease = 0.08f;
     private const float SteeringGripClutchThreshold = 0.12f;
@@ -26,6 +28,12 @@ internal static class Program
     private static volatile bool EmulationPaused;
     private static volatile bool CalibrateSteeringRequested;
     private static volatile bool DisarmSteeringRequested;
+    private static readonly object ActiveStreamGate = new();
+    private static readonly SemaphoreSlim FeedbackSendGate = new(1, 1);
+    private static NetworkStream? ActiveStream;
+    private static int HostShutdownRequested;
+    private static volatile bool QuestUserExitRequested;
+    private static volatile bool GracefulQuestShutdownSent;
     private static int RumblePacked; // high byte = large motor, low byte = small motor
 
     private static async Task<int> Main(string[] args)
@@ -112,10 +120,17 @@ internal static class Program
             }
         }
 
+        using var singleInstance = new Mutex(true, @"Local\QuestPad.Host", out bool ownsInstance);
+        if (!ownsInstance)
+        {
+            FatalError("QuestPad Host is already running. Use the existing tray instance instead of starting a second bridge.");
+            return 6;
+        }
+
         Console.CancelKeyPress += (_, e) =>
         {
             e.Cancel = true;
-            Cancel.Cancel();
+            RequestHostShutdown();
         };
 
         using TrayStatus? tray = noTray ? null : new TrayStatus(
@@ -129,7 +144,7 @@ internal static class Program
                 Status.SetPaused(paused);
                 if (paused) Volatile.Write(ref RumblePacked, 0);
             },
-            () => Cancel.Cancel());
+            RequestHostShutdown);
 
         string? adb = null;
         if (!noAdb)
@@ -214,6 +229,16 @@ internal static class Program
             if (batteryPoller is not null)
                 await batteryPoller.DisposeAsync();
             outputs?.Dispose();
+            if (Volatile.Read(ref HostShutdownRequested) != 0 && !QuestUserExitRequested && adb is not null && serial is not null)
+            {
+                if (GracefulQuestShutdownSent)
+                    await Task.Delay(200);
+                // ADB is the last-resort lifecycle backstop. On the normal path the
+                // protocol shutdown bit lets NativeActivity clean up first; force-stop
+                // is harmless if the process already exited and covers paused XR or a
+                // bridge that disconnected before receiving the final control report.
+                RunAdb(adb, serial, "shell", "am", "force-stop", AdbQuestDeviceSelector.QuestPadPackage);
+            }
             if (adb is not null)
                 RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
             Console.WriteLine("\nQuestPad host stopped");
@@ -242,6 +267,7 @@ internal static class Program
                 bool gyroStickLocked = false;
 
                 using NetworkStream stream = tcp.GetStream();
+                SetActiveStream(stream);
                 byte[] packetBytes = new byte[PacketSize];
                 uint? previousSeq = null;
                 int lastFeedbackKey = int.MinValue;
@@ -265,6 +291,16 @@ internal static class Program
                     }
                     previousSeq = p.Sequence;
                     windowPackets++;
+
+                    if ((p.Flags & FlagQuestUserExitRequested) != 0)
+                    {
+                        QuestUserExitRequested = true;
+                        Volatile.Write(ref RumblePacked, 0);
+                        try { outputs?.Current?.Neutral(); } catch { }
+                        Console.WriteLine("\nQuest exit gesture requested full QuestPad shutdown; closing Windows host.");
+                        Cancel.Cancel();
+                        break;
+                    }
 
                     RuntimeSettingsSnapshot cfg = Settings.Snapshot();
                     ushort control = HostControlBits.For(cfg);
@@ -380,13 +416,16 @@ internal static class Program
                             $"{batteryText} therm {ThermalName(p.Thermal),8} drops {dropped}      ");
                     }
                 }
+                SetActiveStream(null);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                SetActiveStream(null);
                 break;
             }
             catch (Exception ex)
             {
+                SetActiveStream(null);
                 Status.SetConnection(false);
                 mapper.Reset();
                 motionProcessor.Reset();
@@ -397,6 +436,47 @@ internal static class Program
                 catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    private static void RequestHostShutdown()
+    {
+        if (Interlocked.Exchange(ref HostShutdownRequested, 1) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                GracefulQuestShutdownSent = await TrySendQuestShutdownToActiveStreamAsync();
+            }
+            finally
+            {
+                Cancel.Cancel();
+            }
+        });
+    }
+
+    private static async Task<bool> TrySendQuestShutdownToActiveStreamAsync()
+    {
+        NetworkStream? stream;
+        lock (ActiveStreamGate) stream = ActiveStream;
+        if (stream is null || !stream.CanWrite) return false;
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            await SendFeedbackAsync(stream, 0, ControlQuestShutdown, timeout.Token);
+            Console.WriteLine("\nQuest bridge shutdown requested over protocol.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Quest protocol shutdown was not delivered: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void SetActiveStream(NetworkStream? stream)
+    {
+        lock (ActiveStreamGate) ActiveStream = stream;
     }
 
     private static bool UpdateGyroStickLock(
@@ -442,12 +522,20 @@ internal static class Program
 
     private static async Task SendFeedbackAsync(NetworkStream stream, int packed, ushort control, CancellationToken ct)
     {
-        byte[] feedback = new byte[FeedbackSize];
-        BinaryPrimitives.WriteUInt32LittleEndian(feedback.AsSpan(0, 4), FeedbackMagic);
-        feedback[4] = (byte)((packed >> 8) & 0xFF);
-        feedback[5] = (byte)(packed & 0xFF);
-        BinaryPrimitives.WriteUInt16LittleEndian(feedback.AsSpan(6, 2), control);
-        await stream.WriteAsync(feedback, ct);
+        await FeedbackSendGate.WaitAsync(ct);
+        try
+        {
+            byte[] feedback = new byte[FeedbackSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(feedback.AsSpan(0, 4), FeedbackMagic);
+            feedback[4] = (byte)((packed >> 8) & 0xFF);
+            feedback[5] = (byte)(packed & 0xFF);
+            BinaryPrimitives.WriteUInt16LittleEndian(feedback.AsSpan(6, 2), control);
+            await stream.WriteAsync(feedback, ct);
+        }
+        finally
+        {
+            FeedbackSendGate.Release();
+        }
     }
 
     private static async Task ReadExactlyWithTimeoutAsync(NetworkStream stream, byte[] buffer, TimeSpan timeout, CancellationToken outer)

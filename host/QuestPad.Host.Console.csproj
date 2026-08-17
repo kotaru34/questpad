@@ -10,6 +10,11 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>questpad.ico</ApplicationIcon>
+    <Product>QuestPad</Product>
+    <Description>Meta Quest Touch Plus controller bridge for Windows</Description>
+    <Version>0.3.6-test</Version>
+    <FileVersion>0.3.6.0</FileVersion>
     <DefineConstants>$(DefineConstants);QUESTPAD_CONSOLE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>

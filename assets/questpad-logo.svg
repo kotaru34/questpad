@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="QuestPad logo">
+  <circle cx="256" cy="256" r="238" fill="#1670dc"/>
+  <circle cx="256" cy="246" r="122" fill="none" stroke="#fff" stroke-width="48"/>
+  <path d="M316 306 L386 376" fill="none" stroke="#fff" stroke-width="48" stroke-linecap="round"/>
+</svg>

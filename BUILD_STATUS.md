@@ -15,6 +15,10 @@ QuestPad is functional on real Quest 3 hardware and is in active public testing.
 - Controller battery percentage works through the ADB fallback when the OpenXR battery extension returns no usable value.
 - Quest battery temperature is available as a slow ADB-side trend in the tray.
 - Held Start/Menu and held View/Back semantics work correctly.
+- The 3-second exit chord now closes the Quest NativeActivity cleanly without the previous Android ANR.
+- Windows ADB selection correctly identifies the real Quest 3 instead of a phone, and Windows-host startup can launch the Quest APK automatically.
+- Black-mode system brightness control and exact restore on MR/exit are verified on the Quest 3.
+- Portable Windows settings persist next to the executable.
 
 ## Verified motion behaviour
 
@@ -43,6 +47,7 @@ Observed on hardware/gameplay:
 - Both integrated gyro modes produce usable motion input.
 - Extended gameplay sessions confirm Angular-rate-only is the better aiming path; adding optical tracked-pose derivation introduces extra noise/variability rather than improving control.
 - Adaptive smoothing is clearly useful for real hand tremor during precise aiming and is being kept as-is.
+- The optional right-stick gyro lock has been hardware-tested and feels responsive in gameplay.
 - Angular-rate-only remains usable outside Quest camera FOV after Horizon's one-time post-reboot acquisition.
 
 Still worth validating more broadly:
@@ -60,7 +65,7 @@ This is the established default and thermal baseline:
 
 - zero submitted OpenXR composition layers;
 - no eye swapchains or rendered scene;
-- minimum Android window brightness override;
+- minimum Quest **system** brightness driven by the Windows ADB manager, with saved-value/mode restore and portable crash recovery;
 - motion acquisition only when the host requests it.
 
 ### Passthrough / MR — activation verified on Quest 3
@@ -72,8 +77,8 @@ The passthrough path uses optional `XR_FB_passthrough` support:
 - one compositor passthrough layer when active, still with no eye swapchains or Quest-rendered scene;
 - passthrough composition is omitted when OpenXR reports `shouldRender == XR_FALSE`;
 - no raw camera-frame API or camera permission;
-- normal/system display brightness while passthrough is active;
-- passthrough paused and minimum brightness restored when the mode is disabled;
+- saved normal/system display brightness restored by the Windows ADB manager while passthrough is active;
+- passthrough paused and minimum system brightness restored when the mode is disabled;
 - host disconnect clears the passthrough request and returns QuestPad to zero-layer mode;
 - availability/active state reported back to the Windows tray through unused protocol-v2 flag bits.
 
@@ -104,6 +109,16 @@ One **Mounted / rigid steering experiment** is retained for curiosity/testing:
 - Windows-side steering smoothing.
 
 The old Free-air and Hybrid prototypes remain internal legacy code for now but are no longer exposed in the normal tray or CLI and are not an active development target.
+
+## Release polish in the current test branch
+
+Implemented and build-gated, with the new bidirectional lifecycle still awaiting the next Quest 3 hardware pass:
+
+- Windows Exit / Ctrl+C sends an explicit protocol shutdown request to the Quest app; ADB force-stop is retained only as the final lifecycle backstop.
+- Quest exit-chord completion carries an explicit final status flag that closes the Windows host, while accidental transport loss still reconnects.
+- a named Windows single-instance guard prevents two hosts from fighting over ADB forwarding, ViGEm and brightness ownership;
+- the Windows executables, tray and Quest launcher now share one QuestPad application mark.
+- Quest-side settings UI, user-selectable XR polling frequency and a manual session-restart menu were deliberately **not** added: the Windows tray is already the single control surface, ~72 Hz remains the validated low-load baseline, and normal watchdog/autostart recovery already covers the common restart case.
 
 ## Architecture direction
 

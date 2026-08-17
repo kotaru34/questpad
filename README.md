@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/questpad-logo.svg" alt="QuestPad logo" width="96"></p>
+
 # QuestPad
 
 **Use Meta Quest Touch Plus controllers as a low-latency Windows gamepad, with native DS4 gyro and an optional mixed-reality passthrough view.**
@@ -22,6 +24,9 @@ The design priorities are low latency, low Quest-side thermal load, reliable sys
 - Motion queries are off when no motion feature requests them.
 - Sustained-low CPU/GPU hints and Android thermal telemetry.
 - Quest battery-temperature trend and controller battery telemetry in the Windows tray.
+- Safe ADB device selection, automatic Quest APK launch, portable settings and Black-mode brightness restore.
+- Bidirectional graceful lifecycle: exiting either side intentionally closes the other side too; ordinary transport loss still reconnects.
+- Single-instance Windows host guard prevents duplicate ADB/ViGEm/brightness ownership.
 - Real held Start/Menu and View/Back semantics, D-pad modifier, Guide chord, rumble bridge and safe exit gesture.
 - One deliberately limited **Mounted steering experiment** is retained, but QuestPad is not trying to replace a real multi-turn HID steering wheel.
 
@@ -49,9 +54,11 @@ The design priorities are low latency, low Quest-side thermal load, reliable sys
    adb install -r .\quest-debug.apk
    ```
 
-2. Start **QuestPad** from Developer / Unknown Sources on Quest.
-3. Start `QuestPad.Host.exe` on Windows.
+2. Connect the Quest over USB and authorize USB debugging.
+3. Start `QuestPad.Host.exe` on Windows. The host identifies the Quest, creates the device-specific ADB forward and launches the installed QuestPad APK automatically.
 4. The default configuration is the familiar virtual Xbox 360 controller with gyro off and the Quest in black/zero-layer mode.
+
+Use `--no-quest-autostart` only when you deliberately want to launch the Quest side yourself. A connected phone is never selected as the transport target.
 
 If ADB is not in `PATH`:
 
@@ -91,7 +98,7 @@ On the DS4 backend the same physical locations map naturally to Cross/Circle/Squ
 
 ### Exit gesture
 
-Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` are the grip squeezes. Haptic cues occur at one second, two seconds and confirmation.
+Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` are the grip squeezes. Haptic cues occur at one second, two seconds and confirmation. This is an explicit *Exit QuestPad* action: the Quest app sends a final neutral/user-exit packet and the Windows host closes too. A normal USB/TCP dropout does **not** trigger this behaviour.
 
 ## Native gyro
 
@@ -157,7 +164,7 @@ Tray:
 
 `Quest view -> Black / zero-layer (PC-only)`
 
-QuestPad submits **zero OpenXR composition layers**, renders no scene, creates no eye swapchains and applies its minimum-brightness override. This remains the thermal/power baseline and is the preferred mode when the Quest is only being used as the controller bridge.
+QuestPad submits **zero OpenXR composition layers**, renders no scene and creates no eye swapchains. The Windows host snapshots the Quest system brightness and brightness mode over the already-selected ADB device, forces the display to minimum brightness while Black is active, and restores the exact saved values on MR mode or shutdown. A portable recovery file protects the saved values across a host crash. This remains the thermal/power baseline and is the preferred mode when the Quest is only being used as the controller bridge.
 
 ### Passthrough — MR mode
 
@@ -165,7 +172,7 @@ Tray:
 
 `Quest view -> Passthrough (MR)`
 
-QuestPad uses `XR_FB_passthrough` to submit a single full-room reconstruction passthrough compositor layer. It does **not** ask for raw camera frames and still renders no scene or eye swapchains. When enabled, QuestPad restores normal/system display brightness so the room is actually visible.
+QuestPad uses `XR_FB_passthrough` to submit a single full-room reconstruction passthrough compositor layer. It does **not** ask for raw camera frames and still renders no scene or eye swapchains. When enabled, the Windows brightness manager restores the saved normal/system display brightness so the room is actually visible.
 
 The hardened v0.3.2 lifecycle pre-creates the passthrough feature/layer during OpenXR initialization and keeps them paused until requested. Composition is submitted only while the runtime reports `shouldRender == XR_TRUE`. When passthrough is disabled — or the Windows bridge disconnects — the layer is paused and QuestPad returns to the zero-layer, minimum-brightness baseline.
 
@@ -238,13 +245,17 @@ There is no active plan to expand this into a full wheel subsystem. The code rem
 - Android thermal state and Quest battery temperature;
 - live input rate/drop count;
 - Pause output;
-- Exit host.
+- Exit QuestPad (gracefully closes the Quest bridge too).
 
 ## CLI
 
 ```text
 --adb PATH
 --serial SERIAL
+--quest-autostart on|off
+--no-quest-autostart
+--quest-brightness on|off
+--no-quest-brightness
 --quest-view black|passthrough
 --passthrough
 --output xbox|ds4
@@ -294,7 +305,9 @@ Controller battery percentage prefers `XR_EXT_interaction_profile_battery_state_
 
 - OpenXR focus loss -> neutral virtual controller.
 - USB/TCP loss or 250 ms watchdog -> neutral controller and reconnect.
-- Host disconnect also removes the passthrough request, returning QuestPad to zero-layer mode.
+- Unexpected USB/TCP loss neutralizes the controller and leaves the Windows host alive to reconnect.
+- Intentional Windows-host exit sends a protocol shutdown request to the Quest bridge, with ADB force-stop only as a lifecycle backstop.
+- Intentional Quest exit-chord completion is explicitly flagged so the Windows host exits too; it is not inferred from transport loss.
 - Tray pause -> neutral controller and rumble off while transport stays alive.
 - Stale gyro is never repeated as a valid sample.
 - Right-stick gyro lock suppresses output without stopping Quest motion acquisition and clears smoothing state while locked.
