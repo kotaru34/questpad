@@ -1,0 +1,65 @@
+name: docs-0.4-once
+
+on:
+  push:
+    branches: [ agent/session-polish ]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: startsWith(github.event.head_commit.message, 'Apply 0.4 documentation cleanup')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/session-polish
+          fetch-depth: 0
+      - name: Update docs
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def rep(path, old, new):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              if s.count(old) != 1:
+                  raise SystemExit(f'{path}: expected one match, got {s.count(old)} for {old!r}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          rep('README.md',
+              '''| Left trigger | LT |\n| Right trigger | RT |\n| Left grip | LB |\n| Right grip | RB |\n''',
+              '''| Left index trigger | LB |\n| Right index trigger | RB |\n| Left grip | LT (analog) |\n| Right grip | RT (analog) |\n''')
+
+          rep('README.md',
+              '''| Menu + R3 | held Back / View |\n| Menu + L3 (DS4 only) | Touchpad click |\n| Menu + LT + RT for 0.75 s | Guide / PS |\n''',
+              '''| Menu + L3 | held Back / View |\n| Menu + R3 (DS4 only) | Touchpad click |\n| Menu + both grips (logical LT + RT) for 0.75 s | Guide / PS |\n''')
+
+          rep('README.md',
+              '''On the DS4 backend the same physical locations map naturally to Cross/Circle/Square/Triangle, L1/R1, L2/R2, Options, Share and PS. `Menu + L3` adds the DS4 touchpad click without changing Xbox-mode behavior. See [MAPPING.md](MAPPING.md).\n''',
+              '''The v0.4 layout uses Touch index triggers as `LB/RB → L1/R1` and the analog grip squeezes as `LT/RT → L2/R2`. Face-button correspondence remains `A→Cross`, `B→Circle`, `X→Square`, `Y→Triangle`. `Menu + L3` is View/Share, `Menu + R3` is the DS4 touchpad click, and Guide/PS remains `Menu + LT + RT`. See [MAPPING.md](MAPPING.md).\n\nGuide/PS has priority over the 0.50-second plain Menu hold. Once both logical triggers are present, QuestPad cancels Start/Options and starts the Guide chord's own 0.75-second timer; this fixes the earlier timing race where a slightly sequential three-button press could fail.\n''')
+
+          rep('README.md',
+              '''Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` are the grip squeezes. Haptic cues occur at one second, two seconds and confirmation. This is an explicit *Exit QuestPad* action: the Quest app sends a final neutral/user-exit packet and the Windows host closes too. A normal USB/TCP dropout does **not** trigger this behaviour.\n''',
+              '''Hold **both stick clicks + both physical grip squeezes** for **3 seconds**. In the v0.4 gamepad layout those grips are the controls mapped to logical `LT + RT` / DS4 `L2 + R2`. Haptic cues occur at one second, two seconds and confirmation. This is an explicit *Exit QuestPad* action: the Quest app sends a final neutral/user-exit packet and the Windows host closes too. A normal USB/TCP dropout does **not** trigger this behaviour.\n''')
+
+          rep('BUILD_STATUS.md',
+              '''New v0.3.7 recovery candidate, build-gated and awaiting the focused unplug/replug hardware retest:\n\n- unexpected USB/ADB loss still neutralizes output and **does not** quit either side;\n- the host now waits for the same selected Quest ADB serial instead of blindly retrying a stale localhost forward;\n- when that Quest returns, the host removes/recreates `tcp:38888` and retries the existing Quest bridge first;\n- the Quest app is relaunched only when autostart is enabled **and** its process is no longer running, avoiding unnecessary OpenXR-session restarts on ordinary cable reconnects.\n''',
+              '''USB/ADB recovery is now hardware-verified on Quest 3:\n\n- unexpected physical USB/ADB loss neutralizes output and **does not** quit either side;\n- the host waits for the same selected Quest ADB serial instead of blindly retrying a stale localhost forward;\n- after replug, the host removes/recreates `tcp:38888` and reconnects to the already-running Quest bridge automatically;\n- the Quest OpenXR session is not restarted for an ordinary cable reconnect, and normal controller operation resumes without restarting either app;\n- the Quest app is relaunched only when autostart is enabled **and** its process is actually no longer running.\n''')
+
+          marker = '''- Quest-side settings UI, user-selectable XR polling frequency and a manual session-restart menu were deliberately **not** added: the Windows tray is already the single control surface, ~72 Hz remains the validated low-load baseline, and normal watchdog/autostart recovery already covers the common restart case.\n\n## Architecture direction\n'''
+          replacement = '''- Quest-side settings UI, user-selectable XR polling frequency and a manual session-restart menu were deliberately **not** added: the Windows tray is already the single control surface, ~72 Hz remains the validated low-load baseline, and normal watchdog/autostart recovery already covers the common restart case.\n\n### v0.4.0 mapping candidate\n\nBuild-gated and awaiting the next Quest 3 real-game pass:\n\n- Touch index triggers now map to logical `LB/RB` and DS4 `L1/R1`;\n- Touch grip analogs now map to logical `LT/RT` and DS4 `L2/R2`;\n- `Menu + L3` is View/Share and `Menu + R3` is the DS4 touchpad click;\n- Guide/PS remains `Menu + LT + RT`, now using the grip-backed logical triggers;\n- Guide/PS preempts the 0.50-second plain Menu hold and uses a 0.60 trigger threshold plus its existing 0.75-second confirmation timer;\n- a permanent mapper smoke test reproduces the former timing-race scenario and verifies the new shoulder/trigger and L3/R3 modifier layout in CI.\n\n## Architecture direction\n'''
+          rep('BUILD_STATUS.md', marker, replacement)
+
+          Path('.github/workflows/docs-0.4-once.yml').unlink()
+
+      - name: Commit docs
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Document 0.4 mapping candidate"
+          git push origin HEAD:agent/session-polish
