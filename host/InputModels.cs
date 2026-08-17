@@ -43,6 +43,7 @@ internal readonly record struct RuntimeSettingsSnapshot(
     OutputMode Output,
     GyroSourceMode GyroSource,
     SmoothingLevel GyroSmoothing,
+    bool GyroStickLock,
     QuestViewMode QuestView,
     SteeringMode Steering,
     SmoothingLevel SteeringSmoothing,
@@ -57,6 +58,7 @@ internal sealed class RuntimeSettings
         OutputMode.Xbox360,
         GyroSourceMode.Off,
         SmoothingLevel.Off,
+        false,
         QuestViewMode.Black,
         SteeringMode.Off,
         SmoothingLevel.Light,
@@ -99,6 +101,11 @@ internal sealed class RuntimeSettings
     public void SetGyroSmoothing(SmoothingLevel smoothing)
     {
         lock (gate) value = value with { GyroSmoothing = smoothing };
+    }
+
+    public void SetGyroStickLock(bool enabled)
+    {
+        lock (gate) value = value with { GyroStickLock = enabled };
     }
 
     public void SetQuestView(QuestViewMode view)

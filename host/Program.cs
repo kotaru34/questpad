@@ -16,6 +16,8 @@ internal static class Program
     private const int FeedbackSize = 8;
     private const uint FlagPassthroughAvailable = 1u << 5;
     private const uint FlagPassthroughActive = 1u << 6;
+    private const float GyroStickLockEngage = 0.12f;
+    private const float GyroStickLockRelease = 0.08f;
     private const float SteeringGripClutchThreshold = 0.12f;
     private static readonly TimeSpan PacketWatchdog = TimeSpan.FromMilliseconds(250);
     private static readonly CancellationTokenSource Cancel = new();
@@ -52,6 +54,9 @@ internal static class Program
                     break;
                 case "--gyro-smoothing" when i + 1 < args.Length:
                     Settings.SetGyroSmoothing(ParseSmoothing(args[++i]));
+                    break;
+                case "--gyro-stick-lock" when i + 1 < args.Length:
+                    Settings.SetGyroStickLock(ParseOnOff(args[++i]));
                     break;
                 case "--quest-view" when i + 1 < args.Length:
                     Settings.SetQuestView(ParseQuestView(args[++i]));
@@ -191,6 +196,7 @@ internal static class Program
                 Console.WriteLine("QuestPad transport connected (protocol v2 motion/MR-capable)");
                 mapper.Reset();
                 motionProcessor.Reset();
+                bool gyroStickLocked = false;
 
                 using NetworkStream stream = tcp.GetStream();
                 byte[] packetBytes = new byte[PacketSize];
@@ -254,12 +260,24 @@ internal static class Program
                         Console.WriteLine("\nSteering center/geometry captured. Turn RIGHT briefly first so QuestPad can learn a deterministic positive wheel axis.");
                     }
 
-                    ProcessedMotion motion = motionProcessor.Process(motionFrame, cfg);
+                    // Host-side gyro stick lock is intentionally independent of the
+                    // Quest motion request. Horizon keeps streaming angular-rate data
+                    // while locked, so the next unlocked packet can resume immediately.
+                    // Feeding GyroSource=Off into MotionProcessor during lock also resets
+                    // its smoothing state and prevents hidden motion from causing an
+                    // unlock kick.
+                    gyroStickLocked = UpdateGyroStickLock(gyroStickLocked, cfg, p.RX, p.RY);
+                    RuntimeSettingsSnapshot motionCfg = gyroStickLocked
+                        ? cfg with { GyroSource = GyroSourceMode.Off }
+                        : cfg;
+                    ProcessedMotion motion = motionProcessor.Process(motionFrame, motionCfg);
                     bool steeringClutchEngaged = !cfg.SteeringGripClutch ||
                         (p.LG >= SteeringGripClutchThreshold && p.RG >= SteeringGripClutchThreshold);
 
                     string gyroText = cfg.GyroSource switch
                     {
+                        GyroSourceMode.CameraAssisted when gyroStickLocked => "camera DIAG STICK LOCK",
+                        GyroSourceMode.AngularRate when gyroStickLocked => "angular-rate STICK LOCK",
                         GyroSourceMode.CameraAssisted => $"camera DIAG {(motion.GyroValid ? "valid" : "waiting for PT=1")}",
                         GyroSourceMode.AngularRate => $"angular-rate {(motion.GyroValid ? "valid" : "waiting for AV=1")}",
                         _ => "off"
@@ -346,6 +364,21 @@ internal static class Program
                 catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    private static bool UpdateGyroStickLock(
+        bool currentlyLocked,
+        RuntimeSettingsSnapshot settings,
+        float rightX,
+        float rightY)
+    {
+        if (!settings.GyroStickLock || settings.GyroSource == GyroSourceMode.Off)
+            return false;
+
+        float magnitudeSquared = rightX * rightX + rightY * rightY;
+        if (currentlyLocked)
+            return magnitudeSquared > GyroStickLockRelease * GyroStickLockRelease;
+        return magnitudeSquared >= GyroStickLockEngage * GyroStickLockEngage;
     }
 
     private static MotionFrame ToMotionFrame(Packet p)
@@ -552,6 +585,7 @@ internal static class Program
             "  --output xbox|ds4          virtual controller backend\n" +
             "  --gyro off|rate|camera     right-Touch native gyro source\n" +
             "  --gyro-smoothing off|light|medium|strong\n" +
+            "  --gyro-stick-lock on|off   zero gyro immediately while right stick is in use\n" +
             "  --steering off|mounted     limited mounted-wheel experiment\n" +
             "  --steering-range DEG       total lock-to-lock range (60..1080)\n" +
             "  --steering-smoothing off|light|medium|strong\n" +
@@ -565,6 +599,8 @@ internal static class Program
             "Quest view 'passthrough' requests the optional compositor passthrough layer for MR use.\n" +
             "Gyro 'rate' is the recommended path and consumes controller-local OpenXR angular velocity.\n" +
             "Gyro 'camera' is a diagnostic A/B reference that derives rate from tracked pose and requires PT=1.\n" +
+            "Gyro stick lock uses raw right-stick magnitude with 0.12/0.08 engage/release hysteresis and no time debounce.\n" +
+            "The lock is host-side only: Quest motion acquisition remains active so unlock resumes on the next input frame.\n" +
             "Neither gyro mode is raw MEMS access; Horizon may still perform internal sensor fusion.\n" +
             "Steering is a deliberately limited mounted-wheel experiment, not a native multi-turn HID wheel.\n" +
             "Selecting a non-off gyro source automatically selects the DS4 backend.\n" +

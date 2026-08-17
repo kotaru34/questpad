@@ -204,6 +204,12 @@ internal sealed class TrayStatus : IDisposable
         var gsStrong = CheckItem("Strong", () => _settings.SetGyroSmoothing(SmoothingLevel.Strong));
         gyroSmooth.DropDownItems.AddRange(new ToolStripItem[] { gsOff, gsLight, gsMedium, gsStrong });
 
+        var gyroStickLock = CheckItem("Lock gyro while using right stick", () =>
+        {
+            RuntimeSettingsSnapshot cfg = _settings.Snapshot();
+            _settings.SetGyroStickLock(!cfg.GyroStickLock);
+        });
+
         // Steering remains available only as a deliberately limited experiment. The
         // free-air/hybrid prototypes are no longer user-facing because QuestPad is not
         // trying to replace a multi-turn native HID wheel.
@@ -251,7 +257,7 @@ internal sealed class TrayStatus : IDisposable
         {
             title, new ToolStripSeparator(), connection, gamepad, outputStatus, questViewStatus,
             gyroStatus, steeringStatus, leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
-            new ToolStripSeparator(), questViewMenu, outputMenu, gyroMenu, gyroSmooth,
+            new ToolStripSeparator(), questViewMenu, outputMenu, gyroMenu, gyroSmooth, gyroStickLock,
             steeringMenu, steeringRange, steeringSmooth, gripClutch, invertSteering, calibrate, disarm,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
@@ -296,6 +302,7 @@ internal sealed class TrayStatus : IDisposable
             gsLight.Checked = cfg.GyroSmoothing == SmoothingLevel.Light;
             gsMedium.Checked = cfg.GyroSmoothing == SmoothingLevel.Medium;
             gsStrong.Checked = cfg.GyroSmoothing == SmoothingLevel.Strong;
+            gyroStickLock.Checked = cfg.GyroStickLock;
             stOff.Checked = cfg.Steering == SteeringMode.Off;
             stMounted.Checked = cfg.Steering == SteeringMode.Mounted;
             range180.Checked = Math.Abs(cfg.SteeringRangeDegrees - 180) < 1;
