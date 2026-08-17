@@ -1,6 +1,6 @@
 # QuestPad controller mapping
 
-QuestPad maps Touch Plus into a backend-independent logical gamepad state. That logical state can currently be emitted as Xbox 360/XInput or DualShock 4. Experimental steering can replace only logical Left Stick X while preserving every other control.
+QuestPad maps Touch Plus input into a backend-independent logical gamepad. The logical state can currently be emitted as Xbox 360/XInput or DualShock 4. The recommended gyro path adds native DS4 motion without changing where the user's buttons, sticks or triggers are located.
 
 ## Direct controls
 
@@ -33,94 +33,70 @@ The physical **left Menu** button is available to applications and acts as Start
 | Menu + R3 | Back / View held while R3 remains held | Share held while R3 remains held |
 | Hold Menu + LT + RT for 0.75 s | Guide | PS |
 
-Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 becomes a genuine held View/Share state rather than a short pulse.
+Modifier actions must begin before the 0.50-second plain-Menu hold commits. Right-stick camera output is suppressed while the stick is being used as D-pad. Menu + R3 is a genuine held View/Share state rather than a short pulse.
 
 ## Native gyro
 
-Native gyro is available only on the DS4 backend because XInput has no motion fields. The physical source is always the **right Touch Plus controller**.
+Native gyro is available only on the DS4 backend because XInput has no motion fields.
 
-- **Angular-rate only — recommended:** consumes the OpenXR angular-velocity stream and does not consume absolute controller pose on Windows. Real A/B testing on the development Quest found this path better for aiming than the camera-assisted derivative path.
-- **Camera-assisted tracked pose — experimental A/B:** requires optical `POSITION_TRACKED=1` and derives controller-local angular rate from successive tracked orientation samples.
+The physical source is always the **right Touch Plus controller**.
 
-Angular-rate-only must not be described as raw MEMS access: Horizon/OpenXR can still perform internal fusion. The switch compares application-visible optical-pose dependence, accuracy, jitter and thermal behaviour.
+### Recommended: Angular-rate only
 
-Optional Windows-side adaptive gyro smoothing is Off/Light/Medium/Strong. It has been useful in real aiming for hand tremor/jitter and adds no Quest-side tracking workload.
+QuestPad consumes the OpenXR angular-velocity stream and sends controller-local angular rate to the DS4 motion report. Absolute controller orientation and XYZ position are not consumed by the Windows gyro processor.
 
-## Steering-wheel mapping — experimental
+This is not raw MEMS access: Horizon/OpenXR may still perform internal fusion.
 
-Steering mode consumes both Touch Plus controllers and writes one logical field:
+### Diagnostic: Camera-assisted tracked pose
 
-```text
-estimated wheel angle -> Left Stick X
-```
+This path requires optical `POSITION_TRACKED=1` and derives angular rate from successive tracked orientation samples. Hardware A/B testing found it worse for aiming than Angular-rate-only, so it remains a diagnostic comparison mode rather than the recommended gameplay mapping.
 
-Everything else remains active: triggers, grips/shoulders, A/B/X/Y, right stick, stick clicks, Menu modifier controls and haptics.
+### Smoothing
 
-The current output is intentionally still a gamepad axis, not a native HID wheel. Steering is therefore treated as experimental until the fail-safe behaviour and a future HID option are mature enough for release use.
+Optional adaptive smoothing is Off / Light / Medium / Strong and runs entirely on Windows. It does not change the physical control mapping. Hardware testing found it useful for hand tremor during precise micro-aim.
 
-### Center + arm
+## Mounted steering experiment
 
-Steering begins **disarmed**. With the physical wheel/hands centered:
+QuestPad retains one limited steering experiment for two Touch controllers fixed to a rigid ring or plate. It is not intended as a replacement for a real multi-turn HID racing wheel and the old Free-air/Hybrid prototypes are no longer exposed in the normal UI.
 
-1. choose the steering mode;
-2. select **Center + arm steering**;
-3. make the first deliberate learning turn **to the right**.
-
-The first significant post-calibration rotation defines the positive wheel-axis sign, so explicitly turning right first avoids an arbitrary quaternion-axis sign deciding left/right. An **Invert steering direction** toggle remains available for unusual fixtures.
-
-Changing steering mode, reconnecting the transport, a persistent tracking failure, or a large rigid-geometry failure requires a new Center + arm operation.
-
-### Fail-safe neutral rule
-
-While steering mode is enabled, the estimator owns horizontal steering. It does **not** fall back to a possibly non-zero physical left-stick X when the wheel is unavailable.
+When Mounted steering is enabled:
 
 ```text
-valid + armed + clutch satisfied -> estimated steering
-anything else                    -> LX = 0
+estimated mounted-wheel angle -> logical Left Stick X
 ```
 
-A tracking/source fault immediately enters a neutral safety hold. If the fault lasts longer than 250 ms, steering becomes permanently **DISARMED** until Center + arm is used again.
+Everything else remains available: triggers, grips/shoulders, A/B/X/Y, right stick, stick clicks, Menu modifier controls and haptics.
 
-Large calibrated-geometry changes in rigid modes can disarm immediately rather than trying to guess through a controller being removed or a fixture changing shape.
+### Arming and safety
+
+1. Select `Mounted / rigid wheel (experimental)`.
+2. Put the fixture at physical center.
+3. Choose **Center + arm steering**.
+4. Make the first deliberate learning turn to the **right** so the estimator establishes a deterministic positive axis.
+5. Use **Invert steering direction** only if the particular fixture still behaves reversed.
+
+Steering never keeps a stale non-zero LX after a tracking/geometry fault. Invalid, disarmed or clutch-open states explicitly output LX = 0.
+
+A transient tracking problem enters a neutral safety hold. A persistent fault disarms the estimator and requires explicit Center + arm again. Large relative-controller geometry changes can disarm immediately.
 
 ### Optional light-grip clutch
 
-The optional light-grip clutch requires both grip analog values to be at least about `0.12` before steering output is allowed. This threshold is deliberately far below the normal LB/RB press threshold (`0.62`), so a light hold can act as a clutch without requiring a full shoulder-button squeeze.
+The clutch requires both grip analog values to exceed a low threshold (~0.12) before steering is emitted. Releasing either hand immediately makes steering neutral without changing the rest of the logical gamepad.
 
-Releasing either grip gates steering to LX=0 but does not disable the rest of the gamepad. The feature is optional because different mounts and hand positions may not make it comfortable.
+The threshold is intentionally far below the LB/RB shoulder threshold, so the user can lightly hold the fixture without needing a full bumper-producing squeeze.
 
-### Mounted / rigid
+### Position validity
 
-For controllers fixed to a ring, plate, cardboard wheel or similar fixture. Calibration records each controller's arbitrary mounting orientation and the pair's relative geometry.
-
-Both orientations are treated as redundant observations of one rigid body. Small/medium disagreement can suppress the controller whose motion looks like the outlier; a large relative-orientation change disarms steering.
-
-If both controllers are optically position-tracked during Mounted/Hybrid use, the calibrated controller spacing is also checked. A large spacing change can immediately disarm the wheel and helps detect a controller being removed while still visible to Quest cameras.
-
-Mounted steering does not require position data to continue operating outside camera FOV.
-
-### Free-air optical
-
-Uses the line joining the two tracked controller XYZ positions as an imaginary wheel. It is valid only when **both controllers have `POSITION_TRACKED=1`**.
-
-Loss of required optical tracking immediately outputs neutral steering; a persistent loss disarms the mode.
-
-### Hybrid
-
-Uses optical two-hand geometry while both positions are tracked and falls back to orientation-based rigid steering when optical position disappears. Hybrid keeps rigid-geometry checks because it is intended as an optical-assisted mounted wheel rather than unrestricted free-air hand motion.
-
-### Position validity rule
-
-`POSITION_VALID` by itself is not sufficient. A runtime can retain a valid-but-not-currently-tracked position after optical loss. QuestPad therefore consumes controller XYZ **only while `POSITION_TRACKED=1`**; PT=0 position values are ignored completely.
+Mounted steering is primarily orientation-based. When optical position is used as an additional geometry check, XYZ is accepted only while `POSITION_TRACKED=1`; `POSITION_VALID=1` by itself is not treated as current optical tracking.
 
 ## Exiting QuestPad
 
-Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` here are the grip squeezes.
+Hold **LS + RS + LB + RB** for **3 seconds**. `LB/RB` here are grip squeezes.
 
 While the exit gesture is armed:
 
 - LS, RS, LB and RB are suppressed from the virtual controller;
-- both Touch Plus controllers pulse after 1 second;
+- both Touch controllers pulse after 1 second;
 - another cue occurs after 2 seconds;
 - a stronger final confirmation occurs at 3 seconds;
 - the virtual gamepad is neutralized before OpenXR exit is requested.
