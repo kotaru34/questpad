@@ -35,6 +35,7 @@ internal static class Program
         bool noGamepad = false;
         bool noAdb = false;
         bool noTray = false;
+        bool autoStartQuest = true;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -45,6 +46,12 @@ internal static class Program
                     break;
                 case "--serial" when i + 1 < args.Length:
                     serial = args[++i];
+                    break;
+                case "--quest-autostart" when i + 1 < args.Length:
+                    autoStartQuest = ParseOnOff(args[++i]);
+                    break;
+                case "--no-quest-autostart":
+                    autoStartQuest = false;
                     break;
                 case "--output" when i + 1 < args.Length:
                     Settings.SetOutput(ParseOutput(args[++i]));
@@ -128,11 +135,33 @@ internal static class Program
             }
 
             Console.WriteLine($"ADB: {adb}");
+            if (!AdbQuestDeviceSelector.TrySelectQuest(adb, serial, out AdbQuestDevice? quest, out string selectionError) || quest is null)
+            {
+                FatalError(selectionError);
+                return 3;
+            }
+
+            serial = quest.Serial;
+            string questName = string.Join(" ", new[] { quest.Manufacturer, quest.Model }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            if (string.IsNullOrWhiteSpace(questName)) questName = "Meta Quest";
+            Console.WriteLine($"Quest ADB target: {questName} [{serial}]");
+
             RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
             if (!RunAdb(adb, serial, "forward", $"tcp:{Port}", $"tcp:{Port}"))
             {
-                FatalError("Could not create the ADB port forward. Check USB debugging/authorization or pass --serial if multiple Android devices are connected.");
-                return 3;
+                FatalError($"Could not create the ADB port forward on Quest '{serial}'. Check USB debugging/authorization.");
+                return 4;
+            }
+
+            if (autoStartQuest)
+            {
+                if (!AdbQuestDeviceSelector.TryStartQuestPad(adb, quest, out string startError))
+                {
+                    RunAdb(adb, serial, "forward", "--remove", $"tcp:{Port}");
+                    FatalError(startError);
+                    return 5;
+                }
+                Console.WriteLine("QuestPad app launch requested over ADB");
             }
         }
 
@@ -579,7 +608,9 @@ internal static class Program
         const string text =
             "QuestPad.Host [options]\n" +
             "  --adb PATH                 adb.exe path\n" +
-            "  --serial SERIAL            select Android device\n" +
+            "  --serial SERIAL            select and validate a specific Quest ADB device\n" +
+            "  --quest-autostart on|off   auto-start the Quest APK after USB detection (default on)\n" +
+            "  --no-quest-autostart       do not launch the Quest APK automatically\n" +
             "  --quest-view black|passthrough\n" +
             "  --passthrough              alias for --quest-view passthrough\n" +
             "  --output xbox|ds4          virtual controller backend\n" +
@@ -595,6 +626,8 @@ internal static class Program
             "  --no-gamepad               transport/motion diagnostic only\n" +
             "  --no-adb                   assume tcp:38888 is already forwarded\n" +
             "  --no-tray                  console-only mode\n\n" +
+            "Without --serial, QuestPad enumerates ADB devices and selects only a Meta Quest capability match.\n" +
+            "A connected phone is never used as the transport target; multiple matching headsets require --serial.\n" +
             "Quest view 'black' is the zero-composition-layer low-workload PC-only mode.\n" +
             "Quest view 'passthrough' requests the optional compositor passthrough layer for MR use.\n" +
             "Gyro 'rate' is the recommended path and consumes controller-local OpenXR angular velocity.\n" +
