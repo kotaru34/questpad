@@ -38,7 +38,8 @@ internal readonly record struct RuntimeSettingsSnapshot(
     SteeringMode Steering,
     SmoothingLevel SteeringSmoothing,
     float SteeringRangeDegrees,
-    bool SteeringGripClutch);
+    bool SteeringGripClutch,
+    bool SteeringInverted);
 
 internal sealed class RuntimeSettings
 {
@@ -50,6 +51,7 @@ internal sealed class RuntimeSettings
         SteeringMode.Off,
         SmoothingLevel.Light,
         240.0f,
+        false,
         false);
 
     public RuntimeSettingsSnapshot Snapshot()
@@ -107,6 +109,11 @@ internal sealed class RuntimeSettings
     public void SetSteeringGripClutch(bool enabled)
     {
         lock (gate) value = value with { SteeringGripClutch = enabled };
+    }
+
+    public void SetSteeringInverted(bool enabled)
+    {
+        lock (gate) value = value with { SteeringInverted = enabled };
     }
 }
 
