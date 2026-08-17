@@ -17,7 +17,7 @@ internal static class Program
     private const uint FlagPassthroughAvailable = 1u << 5;
     private const uint FlagPassthroughActive = 1u << 6;
     private const uint FlagQuestUserExitRequested = 1u << 7;
-    private const ushort ControlQuestShutdown = 1u << 9;
+    private const ushort ControlQuestShutdown = 1 << 9;
     private const float GyroStickLockEngage = 0.12f;
     private const float GyroStickLockRelease = 0.08f;
     private const float SteeringGripClutchThreshold = 0.12f;
