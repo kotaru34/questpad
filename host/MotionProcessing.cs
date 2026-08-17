@@ -21,7 +21,16 @@ internal sealed class MotionProcessor
         previousSteeringMode = SteeringMode.Off;
     }
 
-    public void CalibrateSteering(MotionFrame frame, SteeringMode mode) => steering.Calibrate(frame, mode);
+    public void CalibrateSteering(MotionFrame frame, SteeringMode mode)
+    {
+        // Calibration is itself the explicit transition into the selected steering
+        // mode. Keep the mode tracker synchronized so the immediately following
+        // Process() call cannot interpret the same selection as a fresh mode change
+        // and wipe the just-captured center/arm state.
+        previousSteeringMode = mode;
+        steering.Calibrate(frame, mode);
+    }
+
     public void DisarmSteering() => steering.Disarm("manually disarmed — center + arm");
 
     public ProcessedMotion Process(MotionFrame frame, RuntimeSettingsSnapshot settings)
