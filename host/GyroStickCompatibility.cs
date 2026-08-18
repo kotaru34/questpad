@@ -4,6 +4,20 @@ internal static class GyroStickCompatibility
 {
     private const float RadToDeg = 180.0f / MathF.PI;
     internal const float FullStickDegreesPerSecond = 180.0f;
+    internal const float MinSensitivity = 0.10f;
+    internal const float MaxSensitivity = 5.00f;
+    private static volatile float sensitivity = 1.0f;
+
+    public static float Sensitivity => sensitivity;
+
+    public static float NormalizeSensitivity(float value)
+    {
+        if (!float.IsFinite(value)) return 1.0f;
+        return Math.Clamp(value, MinSensitivity, MaxSensitivity);
+    }
+
+    public static void SetSensitivity(float value) =>
+        sensitivity = NormalizeSensitivity(value);
 
     public static (float X, float Y) Apply(float stickX, float stickY, ProcessedMotion motion)
     {
@@ -12,8 +26,9 @@ internal static class GyroStickCompatibility
         if (!motion.GyroValid)
             return (x, y);
 
-        float yaw = -motion.GyroRadiansPerSecond.Y * RadToDeg / FullStickDegreesPerSecond;
-        float pitch = motion.GyroRadiansPerSecond.X * RadToDeg / FullStickDegreesPerSecond;
+        float scale = Sensitivity;
+        float yaw = -motion.GyroRadiansPerSecond.Y * RadToDeg / FullStickDegreesPerSecond * scale;
+        float pitch = motion.GyroRadiansPerSecond.X * RadToDeg / FullStickDegreesPerSecond * scale;
         if (!float.IsFinite(yaw) || !float.IsFinite(pitch))
             return (x, y);
 
