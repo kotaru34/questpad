@@ -204,6 +204,23 @@ internal sealed class TrayStatus : IDisposable
         var gsStrong = CheckItem("Strong", () => _settings.SetGyroSmoothing(SmoothingLevel.Strong));
         gyroSmooth.DropDownItems.AddRange(new ToolStripItem[] { gsOff, gsLight, gsMedium, gsStrong });
 
+        var gyroStickSensitivity = new ToolStripMenuItem("Xbox gyro sensitivity (1×)")
+        {
+            ToolTipText = "Only affects Xbox 360 / XInput gyro-to-right-stick mode."
+        };
+        var gss025 = CheckItem("0.25×", () => _settings.SetGyroStickSensitivity(0.25f));
+        var gss050 = CheckItem("0.50×", () => _settings.SetGyroStickSensitivity(0.50f));
+        var gss075 = CheckItem("0.75×", () => _settings.SetGyroStickSensitivity(0.75f));
+        var gss100 = CheckItem("1.00×", () => _settings.SetGyroStickSensitivity(1.00f));
+        var gss150 = CheckItem("1.50×", () => _settings.SetGyroStickSensitivity(1.50f));
+        var gss200 = CheckItem("2.00×", () => _settings.SetGyroStickSensitivity(2.00f));
+        var gss300 = CheckItem("3.00×", () => _settings.SetGyroStickSensitivity(3.00f));
+        var gss400 = CheckItem("4.00×", () => _settings.SetGyroStickSensitivity(4.00f));
+        gyroStickSensitivity.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            gss025, gss050, gss075, gss100, gss150, gss200, gss300, gss400
+        });
+
         var gyroStickLock = CheckItem("Lock gyro while using right stick", () =>
         {
             RuntimeSettingsSnapshot cfg = _settings.Snapshot();
@@ -257,7 +274,7 @@ internal sealed class TrayStatus : IDisposable
         {
             title, new ToolStripSeparator(), connection, gamepad, outputStatus, questViewStatus,
             gyroStatus, steeringStatus, leftBattery, rightBattery, batterySource, thermal, batteryTemp, cadence,
-            new ToolStripSeparator(), questViewMenu, outputMenu, gyroMenu, gyroSmooth, gyroStickLock,
+            new ToolStripSeparator(), questViewMenu, outputMenu, gyroMenu, gyroSmooth, gyroStickSensitivity, gyroStickLock,
             steeringMenu, steeringRange, steeringSmooth, gripClutch, invertSteering, calibrate, disarm,
             new ToolStripSeparator(), pause, new ToolStripSeparator(), exit
         });
@@ -302,6 +319,15 @@ internal sealed class TrayStatus : IDisposable
             gsLight.Checked = cfg.GyroSmoothing == SmoothingLevel.Light;
             gsMedium.Checked = cfg.GyroSmoothing == SmoothingLevel.Medium;
             gsStrong.Checked = cfg.GyroSmoothing == SmoothingLevel.Strong;
+            gyroStickSensitivity.Text = $"Xbox gyro sensitivity ({cfg.GyroStickSensitivity:0.##}×)";
+            gss025.Checked = Math.Abs(cfg.GyroStickSensitivity - 0.25f) < 0.001f;
+            gss050.Checked = Math.Abs(cfg.GyroStickSensitivity - 0.50f) < 0.001f;
+            gss075.Checked = Math.Abs(cfg.GyroStickSensitivity - 0.75f) < 0.001f;
+            gss100.Checked = Math.Abs(cfg.GyroStickSensitivity - 1.00f) < 0.001f;
+            gss150.Checked = Math.Abs(cfg.GyroStickSensitivity - 1.50f) < 0.001f;
+            gss200.Checked = Math.Abs(cfg.GyroStickSensitivity - 2.00f) < 0.001f;
+            gss300.Checked = Math.Abs(cfg.GyroStickSensitivity - 3.00f) < 0.001f;
+            gss400.Checked = Math.Abs(cfg.GyroStickSensitivity - 4.00f) < 0.001f;
             gyroStickLock.Checked = cfg.GyroStickLock;
             stOff.Checked = cfg.Steering == SteeringMode.Off;
             stMounted.Checked = cfg.Steering == SteeringMode.Mounted;
