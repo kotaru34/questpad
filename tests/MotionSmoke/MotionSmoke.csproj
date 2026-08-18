@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="../../host/InputModels.cs" Link="InputModels.cs" />
     <Compile Include="../../host/MotionProcessing.cs" Link="MotionProcessing.cs" />
+    <Compile Include="../../host/Ds4SensorClock.cs" Link="Ds4SensorClock.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>
