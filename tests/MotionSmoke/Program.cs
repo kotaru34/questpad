@@ -68,6 +68,8 @@ Near(tilted.GyroRadiansPerSecond.X, angular.X, "tilted gyro X must remain unchan
 Near(tilted.GyroRadiansPerSecond.Y, angular.Y, "tilted gyro Y must remain unchanged");
 Near(tilted.GyroRadiansPerSecond.Z, angular.Z, "tilted gyro Z must remain unchanged");
 
+GyroStickCompatibility.SetSensitivity(1.0f);
+
 // XInput compatibility path: with gyro invalid the physical right stick is untouched.
 ProcessedMotion noGyro = motion with { GyroValid = false };
 (float noGyroX, float noGyroY) = GyroStickCompatibility.Apply(0.25f, -0.4f, noGyro);
@@ -75,7 +77,7 @@ Near(noGyroX, 0.25f, "gyro-stick disabled X");
 Near(noGyroY, -0.4f, "gyro-stick disabled Y");
 
 // Candidate axis convention for hardware validation: controller-local +Y rotation
-// drives right-stick X negative. 180 deg/s is the initial full-stick reference.
+// drives right-stick X negative. 180 deg/s is the 1.0x full-stick reference.
 ProcessedMotion yawMotion = motion with
 {
     GyroRadiansPerSecond = new Vector3(0.0f, MathF.PI, 0.0f)
@@ -92,6 +94,23 @@ ProcessedMotion pitchMotion = motion with
 (float pitchX, float pitchY) = GyroStickCompatibility.Apply(0.0f, 0.0f, pitchMotion);
 Near(pitchX, 0.0f, "gyro-stick pitch must not alter X");
 Near(pitchY, 0.5f, "gyro-stick +X pitch at 90 deg/s");
+
+// Sensitivity is a pure multiplier around the established 1.0x mapping.
+GyroStickCompatibility.SetSensitivity(2.0f);
+(float sensitiveX, float sensitiveY) = GyroStickCompatibility.Apply(0.0f, 0.0f, pitchMotion);
+Near(sensitiveX, 0.0f, "2x sensitivity must not cross-couple X");
+Near(sensitiveY, 1.0f, "2x sensitivity turns 90 deg/s into full-stick pitch");
+
+GyroStickCompatibility.SetSensitivity(0.5f);
+(float halfYawX, float halfYawY) = GyroStickCompatibility.Apply(0.0f, 0.0f, yawMotion);
+Near(halfYawX, -0.5f, "0.5x sensitivity halves yaw output");
+Near(halfYawY, 0.0f, "0.5x sensitivity must not cross-couple Y");
+
+Check(Math.Abs(GyroStickCompatibility.NormalizeSensitivity(999.0f) - GyroStickCompatibility.MaxSensitivity) < 1e-4f,
+    "gyro-stick sensitivity upper bound");
+Check(Math.Abs(GyroStickCompatibility.NormalizeSensitivity(0.001f) - GyroStickCompatibility.MinSensitivity) < 1e-4f,
+    "gyro-stick sensitivity lower bound");
+GyroStickCompatibility.SetSensitivity(1.0f);
 
 // Gyro is additive to the physical stick and clamps rather than wrapping/saturating
 // the raw conversion later in the ViGEm backend.
@@ -114,4 +133,4 @@ ushort wrappedDelta = unchecked((ushort)(t1 - t0));
 Check(wrappedDelta == unchecked((ushort)187_500),
     $"DS4 sensor clock must advance 187500 units/s modulo 16-bit; got {wrappedDelta}");
 
-Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, XInput gyro-stick mapping valid, DS4 sensor clock valid.");
+Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, adjustable XInput gyro-stick mapping valid, DS4 sensor clock valid.");
