@@ -1,0 +1,24 @@
+name: gyro-stick-run-id
+on:
+  push:
+    branches: [ agent/session-polish ]
+
+permissions:
+  contents: write
+
+jobs:
+  mark:
+    if: "!startsWith(github.event.head_commit.message, 'Record 0.4.3')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/session-polish
+      - name: Record run id immediately
+        run: |
+          printf 'run_id=%s\nsha=%s\n' '${{ github.run_id }}' '${{ github.sha }}' > .github/gyro-stick-run-start.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/gyro-stick-run-start.txt
+          git commit -m 'Record 0.4.3 gyro-stick run start' || exit 0
+          git push origin HEAD:agent/session-polish
