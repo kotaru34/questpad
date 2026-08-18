@@ -2,10 +2,14 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, agent/session-polish ]
+
+permissions:
+  contents: write
 
 jobs:
   quest-apk:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +35,7 @@ jobs:
           path: motionprobe/build/outputs/apk/debug/motionprobe-debug.apk
 
   windows-host:
+    if: github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/agent/session-polish' && startsWith(github.event.head_commit.message, 'Run 0.4.4 candidate'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +44,7 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Mapper regression smoke test
         run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
-      - name: Motion/IMU regression smoke test
+      - name: Motion/IMU and Xbox sensitivity regression smoke test
         run: dotnet run --project tests/MotionSmoke/MotionSmoke.csproj -c Release
       - name: Publish tray host
         run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
@@ -63,8 +68,28 @@ jobs:
           if ($settings.Output -ne 'Xbox360' -or $settings.GyroSource -ne 'Off') {
             throw "Portable settings file did not contain the expected defaults"
           }
+          if ([Math]::Abs([double]$settings.GyroStickSensitivity - 1.0) -gt 0.001) {
+            throw "Xbox gyro sensitivity default must remain 1.0x"
+          }
           Pop-Location
       - uses: actions/upload-artifact@v4
         with:
-          name: QuestPad-Host-win-x64
+          name: QuestPad-Host-0.4.4-test
           path: dist/package/*
+
+  candidate-result-marker:
+    if: always() && github.ref == 'refs/heads/agent/session-polish' && startsWith(github.event.head_commit.message, 'Run 0.4.4 candidate')
+    needs: windows-host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/session-polish
+      - name: Record candidate result
+        run: |
+          printf 'run_id=%s\nvalidated_sha=%s\nresult=%s\n' '${{ github.run_id }}' '${{ github.sha }}' '${{ needs.windows-host.result }}' > .github/0.4.4-ci-result.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/0.4.4-ci-result.txt
+          git commit -m 'Record 0.4.4 CI result' || exit 0
+          git push origin HEAD:agent/session-polish
