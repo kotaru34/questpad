@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using QuestPad.Host;
 
@@ -67,4 +68,15 @@ Near(tilted.GyroRadiansPerSecond.X, angular.X, "tilted gyro X must remain unchan
 Near(tilted.GyroRadiansPerSecond.Y, angular.Y, "tilted gyro Y must remain unchanged");
 Near(tilted.GyroRadiansPerSecond.Z, angular.Z, "tilted gyro Z must remain unchanged");
 
-Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid.");
+// A real DS4 sensor clock advances at 187,500 units/s (5.33 us/unit). The old
+// QuestPad implementation advanced by one per host report, making sensor time about
+// 2,600x too slow at 72 Hz. Verify the new monotonic conversion including 16-bit wrap.
+long t0Ticks = Stopwatch.Frequency * 10L;
+long t1Ticks = t0Ticks + Stopwatch.Frequency;
+ushort t0 = Ds4SensorClock.FromStopwatchTicks(t0Ticks);
+ushort t1 = Ds4SensorClock.FromStopwatchTicks(t1Ticks);
+ushort wrappedDelta = unchecked((ushort)(t1 - t0));
+Check(wrappedDelta == unchecked((ushort)187_500),
+    $"DS4 sensor clock must advance 187500 units/s modulo 16-bit; got {wrappedDelta}");
+
+Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, DS4 sensor clock valid.");
