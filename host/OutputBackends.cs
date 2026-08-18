@@ -135,7 +135,6 @@ internal sealed class Xbox360Backend : IOutputBackend
 internal sealed class DualShock4Backend : IOutputBackend
 {
     private readonly IDualShock4Controller pad;
-    private ushort timestamp;
     private int lastBatteryPercent = 100;
 
     // A physical DS4 exposes calibrated sensor data through its HID feature report.
@@ -165,8 +164,7 @@ internal sealed class DualShock4Backend : IOutputBackend
             lastBatteryPercent = Math.Clamp(batteryPercent.Value, 0, 100);
 
         byte[] report = BuildBaseReport(s, lastBatteryPercent);
-        timestamp++;
-        BinaryPrimitives.WriteUInt16LittleEndian(report.AsSpan(9, 2), timestamp);
+        StampSensorClock(report);
 
         if (motion.GyroValid)
         {
@@ -182,7 +180,7 @@ internal sealed class DualShock4Backend : IOutputBackend
             BinaryPrimitives.WriteInt16LittleEndian(report.AsSpan(16, 2), gz);
         }
 
-        if (motion.AccelerationValid)
+        if (Ds4Diagnostics.AccelerometerEnabled && motion.AccelerationValid)
         {
             // A real DS4 carries signed accelerometer samples at 8192 counts/g.
             // QuestPad supplies the gravity/specific-force component only, derived
@@ -198,13 +196,23 @@ internal sealed class DualShock4Backend : IOutputBackend
 
     public void Neutral()
     {
-        pad.SubmitRawReport(BuildBaseReport(LogicalGamepadState.Neutral(), lastBatteryPercent));
+        byte[] report = BuildBaseReport(LogicalGamepadState.Neutral(), lastBatteryPercent);
+        StampSensorClock(report);
+        pad.SubmitRawReport(report);
     }
 
     public void Dispose()
     {
         try { pad.Disconnect(); } catch { }
         pad.Dispose();
+    }
+
+    private static void StampSensorClock(byte[] report)
+    {
+        // DS4 wTimestamp is a 16-bit sensor clock, not a report sequence number.
+        // It advances every ~5.33 us and naturally wraps. Keeping it monotonic even
+        // for neutral reports avoids a fake timestamp reset across pause/watchdog.
+        BinaryPrimitives.WriteUInt16LittleEndian(report.AsSpan(9, 2), Ds4SensorClock.Now());
     }
 
     private static byte[] BuildBaseReport(LogicalGamepadState s, int batteryPercent)
