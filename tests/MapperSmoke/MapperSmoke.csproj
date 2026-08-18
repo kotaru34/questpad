@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../host/InputModels.cs" Link="InputModels.cs" />
+    <Compile Include="../../host/GyroStickCompatibility.cs" Link="GyroStickCompatibility.cs" />
     <Compile Include="../../host/ControllerMapper.cs" Link="ControllerMapper.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
