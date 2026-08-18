@@ -76,17 +76,44 @@ ProcessedMotion noGyro = motion with { GyroValid = false };
 Near(noGyroX, 0.25f, "gyro-stick disabled X");
 Near(noGyroY, -0.4f, "gyro-stick disabled Y");
 
-// Candidate axis convention for hardware validation: controller-local +Y rotation
-// drives right-stick X negative. 180 deg/s is the 1.0x full-stick reference.
+// At the normal identity pose gravity is controller-local +Y. The new player-space
+// projection must therefore be exactly backward-compatible with QuestPad's old
+// horizontal mapping: controller-local +Y rotation drives right-stick X negative.
 ProcessedMotion yawMotion = motion with
 {
-    GyroRadiansPerSecond = new Vector3(0.0f, MathF.PI, 0.0f)
+    GyroRadiansPerSecond = new Vector3(0.0f, MathF.PI, 0.0f),
+    AccelerationValid = true,
+    AccelerationG = Vector3.UnitY
 };
 (float yawX, float yawY) = GyroStickCompatibility.Apply(0.0f, 0.0f, yawMotion);
-Near(yawX, -1.0f, "gyro-stick +Y yaw at 180 deg/s");
-Near(yawY, 0.0f, "gyro-stick yaw must not alter Y");
+Near(yawX, -1.0f, "identity player-space +Y yaw at 180 deg/s");
+Near(yawY, 0.0f, "player-space yaw must not alter Y");
 
-// Controller-local +X rotation drives right-stick Y positive. 90 deg/s is half scale.
+// When the controller is rolled so gravity is local +Z, wrist roll around local Z
+// becomes world/player yaw. The old X/Y-only implementation ignored this entirely,
+// producing the observed '+'-shaped response to circular wrist motion.
+ProcessedMotion rolledYawMotion = motion with
+{
+    GyroRadiansPerSecond = new Vector3(0.0f, 0.0f, MathF.PI),
+    AccelerationValid = true,
+    AccelerationG = Vector3.UnitZ
+};
+(float rolledYawX, float rolledYawY) = GyroStickCompatibility.Apply(0.0f, 0.0f, rolledYawMotion);
+Near(rolledYawX, -1.0f, "rolled local-Z motion must contribute to player-space yaw");
+Near(rolledYawY, 0.0f, "rolled player-space yaw must not alter pitch");
+
+// If orientation/gravity is unavailable, degrade to the exact old local-Y mapping
+// rather than changing gyro semantics or dropping horizontal aim altogether.
+ProcessedMotion fallbackYawMotion = yawMotion with
+{
+    AccelerationValid = false,
+    AccelerationG = Vector3.Zero
+};
+(float fallbackYawX, float fallbackYawY) = GyroStickCompatibility.Apply(0.0f, 0.0f, fallbackYawMotion);
+Near(fallbackYawX, -1.0f, "gravity-invalid fallback preserves old yaw mapping");
+Near(fallbackYawY, 0.0f, "gravity-invalid fallback preserves pitch independence");
+
+// Controller-local +X rotation remains pitch. 90 deg/s is half scale.
 ProcessedMotion pitchMotion = motion with
 {
     GyroRadiansPerSecond = new Vector3(MathF.PI / 2.0f, 0.0f, 0.0f)
@@ -116,7 +143,9 @@ GyroStickCompatibility.SetSensitivity(1.0f);
 // the raw conversion later in the ViGEm backend.
 ProcessedMotion additiveMotion = motion with
 {
-    GyroRadiansPerSecond = new Vector3(0.0f, -MathF.PI / 2.0f, 0.0f)
+    GyroRadiansPerSecond = new Vector3(0.0f, -MathF.PI / 2.0f, 0.0f),
+    AccelerationValid = true,
+    AccelerationG = Vector3.UnitY
 };
 (float additiveX, float additiveY) = GyroStickCompatibility.Apply(0.75f, -0.2f, additiveMotion);
 Near(additiveX, 1.0f, "gyro-stick additive X clamp");
@@ -133,4 +162,4 @@ ushort wrappedDelta = unchecked((ushort)(t1 - t0));
 Check(wrappedDelta == unchecked((ushort)187_500),
     $"DS4 sensor clock must advance 187500 units/s modulo 16-bit; got {wrappedDelta}");
 
-Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, adjustable XInput gyro-stick mapping valid, DS4 sensor clock valid.");
+Console.WriteLine("Motion smoke tests passed: native gyro unchanged, gravity accelerometer valid, player-space XInput gyro mapping valid, adjustable sensitivity valid, DS4 sensor clock valid.");
