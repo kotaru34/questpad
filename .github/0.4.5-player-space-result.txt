@@ -1,3 +1,0 @@
-run_id=32145376418
-validated_sha=1fafe3854e90e50c79bdb7a19cb9a8980b735bed
-result=success
