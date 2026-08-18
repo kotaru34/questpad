@@ -27,10 +27,12 @@ internal static class Ds4SensorClock
     }
 }
 
-// Temporary 0.4.2 A/B switch. Keep this session-only so a diagnostic choice does not
-// silently become a persistent compatibility setting. If hardware testing proves the
-// gravity accelerometer universally safe, this switch can disappear again.
+// Temporary 0.4.2 A/B switch. It is deliberately session-only and bypasses the
+// persistent settings model: launch either host with --ds4-no-accelerometer to emit
+// the exact same DS4 reports except that accel X/Y/Z remain zero.
 internal static class Ds4Diagnostics
 {
-    public static volatile bool AccelerometerEnabled = true;
+    public static readonly bool AccelerometerEnabled =
+        !Environment.GetCommandLineArgs().Any(arg =>
+            arg.Equals("--ds4-no-accelerometer", StringComparison.OrdinalIgnoreCase));
 }
