@@ -1,30 +1,13 @@
-name: gyro-stick-run-id
+name: gyro-stick-0.4.3-candidate
 on:
+  pull_request:
+    branches: [ main ]
   push:
     branches: [ agent/session-polish ]
 
-permissions:
-  contents: write
-
 jobs:
-  mark:
-    if: "startsWith(github.event.head_commit.message, 'Run isolated 0.4.3')"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/session-polish
-      - name: Record isolated run id immediately
-        run: |
-          printf 'run_id=%s\nsha=%s\n' '${{ github.run_id }}' '${{ github.sha }}' > .github/gyro-stick-isolated-run.txt
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/gyro-stick-isolated-run.txt
-          git commit -m 'Record 0.4.3 isolated run id' || exit 0
-          git push origin HEAD:agent/session-polish
-
   windows-host:
-    if: "startsWith(github.event.head_commit.message, 'Run isolated 0.4.3')"
+    if: "github.event_name == 'pull_request' || startsWith(github.event.head_commit.message, 'Run isolated 0.4.3')"
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
