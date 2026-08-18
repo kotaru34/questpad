@@ -125,19 +125,19 @@ _ = batteryPercent;
           name: QuestPad-Host-0.4.3-stick-test
           path: dist/package/*
 
-  candidate-success-marker:
-    if: github.ref == 'refs/heads/agent/session-polish' && (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Record 0.4.3'))
+  candidate-result-marker:
+    if: always() && github.ref == 'refs/heads/agent/session-polish' && (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Record 0.4.3'))
     needs: windows-host
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/session-polish
-      - name: Record successful candidate
+      - name: Record candidate result
         run: |
-          printf 'run_id=%s\nvalidated_sha=%s\n' '${{ github.run_id }}' '${{ github.sha }}' > .github/gyro-stick-ci-result.txt
+          printf 'run_id=%s\nvalidated_sha=%s\nresult=%s\n' '${{ github.run_id }}' '${{ github.sha }}' '${{ needs.windows-host.result }}' > .github/gyro-stick-ci-result.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/gyro-stick-ci-result.txt
-          git commit -m 'Record 0.4.3 gyro-to-stick candidate CI'
+          git commit -m 'Record 0.4.3 gyro-to-stick candidate CI' || exit 0
           git push origin HEAD:agent/session-polish
