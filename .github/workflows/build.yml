@@ -2,10 +2,11 @@ name: build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, agent/session-polish ]
 
 jobs:
   quest-apk:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,57 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Apply 0.4.3 gyro-to-stick compatibility probe
+        if: github.ref == 'refs/heads/agent/session-polish'
+        shell: pwsh
+        run: |
+          $p = 'host/InputModels.cs'
+          $s = Get-Content $p -Raw
+          $pattern = 'Output = output,\s*GyroSource = output == OutputMode\.Xbox360 \? GyroSourceMode\.Off : value\.GyroSource'
+          $matches = [regex]::Matches($s, $pattern)
+          if ($matches.Count -ne 1) { throw "InputModels diagnostic patch expected one SetOutput match, got $($matches.Count)" }
+          $s = [regex]::Replace($s, $pattern, 'Output = output', 1)
+          Set-Content $p $s -NoNewline
+
+          $p = 'host/OutputBackends.cs'
+          $s = Get-Content $p -Raw
+          $pattern = '_ = batteryPercent;\r?\n        pad\.ResetReport\(\);'
+          $matches = [regex]::Matches($s, $pattern)
+          if ($matches.Count -ne 1) { throw "OutputBackends diagnostic patch expected one Xbox Apply insertion point, got $($matches.Count)" }
+          $replacement = @'
+_ = batteryPercent;
+
+        // 0.4.3 compatibility probe: XInput has no native motion channel, so when
+        // an angular-rate source is active, convert the right Touch controller's
+        // local yaw/pitch rate directly into additive right-stick deflection. This
+        // bypasses Steam Input completely while retaining the physical right stick.
+        float rightX = s.RX;
+        float rightY = s.RY;
+        if (motion.GyroValid)
+        {
+            const float RadToDeg = 180.0f / MathF.PI;
+            const float FullStickDegreesPerSecond = 180.0f;
+            float yaw = -motion.GyroRadiansPerSecond.Y * RadToDeg / FullStickDegreesPerSecond;
+            float pitch = motion.GyroRadiansPerSecond.X * RadToDeg / FullStickDegreesPerSecond;
+            rightX = Math.Clamp(rightX + yaw, -1.0f, 1.0f);
+            rightY = Math.Clamp(rightY + pitch, -1.0f, 1.0f);
+        }
+
+        pad.ResetReport();
+'@
+          $s = [regex]::Replace($s, $pattern, $replacement, 1)
+          $s = $s.Replace('Xbox360Axis.RightThumbX, ToShort(s.RX)', 'Xbox360Axis.RightThumbX, ToShort(rightX)')
+          $s = $s.Replace('Xbox360Axis.RightThumbY, ToShort(s.RY)', 'Xbox360Axis.RightThumbY, ToShort(rightY)')
+          Set-Content $p $s -NoNewline
+
+          foreach ($p in @('host/QuestPad.Host.csproj', 'host/QuestPad.Host.Console.csproj')) {
+            $s = Get-Content $p -Raw
+            $s = $s.Replace('<Version>0.4.2-test</Version>', '<Version>0.4.3-stick-test</Version>')
+            $s = $s.Replace('<FileVersion>0.4.2.0</FileVersion>', '<FileVersion>0.4.3.0</FileVersion>')
+            Set-Content $p $s -NoNewline
+          }
+
       - name: Mapper regression smoke test
         run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
       - name: Motion/IMU regression smoke test
@@ -66,5 +118,5 @@ jobs:
           Pop-Location
       - uses: actions/upload-artifact@v4
         with:
-          name: QuestPad-Host-win-x64
+          name: QuestPad-Host-0.4.3-stick-test
           path: dist/package/*
