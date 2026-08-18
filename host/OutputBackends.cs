@@ -80,11 +80,18 @@ internal sealed class Xbox360Backend : IOutputBackend
         // feeder-side battery field to populate; keep the parameter only so all
         // backends share one interface.
         _ = batteryPercent;
+
+        // XInput has no native motion channel. When a gyro source is deliberately
+        // kept active while Xbox output is selected, convert the right Touch angular
+        // rate into additive right-stick deflection. This bypasses Steam Input while
+        // preserving the physical right stick and the established gyro processing.
+        (float rightX, float rightY) = GyroStickCompatibility.Apply(s.RX, s.RY, motion);
+
         pad.ResetReport();
         pad.SetAxisValue(Xbox360Axis.LeftThumbX, ToShort(s.LX));
         pad.SetAxisValue(Xbox360Axis.LeftThumbY, ToShort(s.LY));
-        pad.SetAxisValue(Xbox360Axis.RightThumbX, ToShort(s.RX));
-        pad.SetAxisValue(Xbox360Axis.RightThumbY, ToShort(s.RY));
+        pad.SetAxisValue(Xbox360Axis.RightThumbX, ToShort(rightX));
+        pad.SetAxisValue(Xbox360Axis.RightThumbY, ToShort(rightY));
         pad.SetSliderValue(Xbox360Slider.LeftTrigger, ToByte01(s.LT));
         pad.SetSliderValue(Xbox360Slider.RightTrigger, ToByte01(s.RT));
 

@@ -68,6 +68,41 @@ Near(tilted.GyroRadiansPerSecond.X, angular.X, "tilted gyro X must remain unchan
 Near(tilted.GyroRadiansPerSecond.Y, angular.Y, "tilted gyro Y must remain unchanged");
 Near(tilted.GyroRadiansPerSecond.Z, angular.Z, "tilted gyro Z must remain unchanged");
 
+// XInput compatibility path: with gyro invalid the physical right stick is untouched.
+ProcessedMotion noGyro = motion with { GyroValid = false };
+(float noGyroX, float noGyroY) = GyroStickCompatibility.Apply(0.25f, -0.4f, noGyro);
+Near(noGyroX, 0.25f, "gyro-stick disabled X");
+Near(noGyroY, -0.4f, "gyro-stick disabled Y");
+
+// Candidate axis convention for hardware validation: controller-local +Y rotation
+// drives right-stick X negative. 180 deg/s is the initial full-stick reference.
+ProcessedMotion yawMotion = motion with
+{
+    GyroRadiansPerSecond = new Vector3(0.0f, MathF.PI, 0.0f)
+};
+(float yawX, float yawY) = GyroStickCompatibility.Apply(0.0f, 0.0f, yawMotion);
+Near(yawX, -1.0f, "gyro-stick +Y yaw at 180 deg/s");
+Near(yawY, 0.0f, "gyro-stick yaw must not alter Y");
+
+// Controller-local +X rotation drives right-stick Y positive. 90 deg/s is half scale.
+ProcessedMotion pitchMotion = motion with
+{
+    GyroRadiansPerSecond = new Vector3(MathF.PI / 2.0f, 0.0f, 0.0f)
+};
+(float pitchX, float pitchY) = GyroStickCompatibility.Apply(0.0f, 0.0f, pitchMotion);
+Near(pitchX, 0.0f, "gyro-stick pitch must not alter X");
+Near(pitchY, 0.5f, "gyro-stick +X pitch at 90 deg/s");
+
+// Gyro is additive to the physical stick and clamps rather than wrapping/saturating
+// the raw conversion later in the ViGEm backend.
+ProcessedMotion additiveMotion = motion with
+{
+    GyroRadiansPerSecond = new Vector3(0.0f, -MathF.PI / 2.0f, 0.0f)
+};
+(float additiveX, float additiveY) = GyroStickCompatibility.Apply(0.75f, -0.2f, additiveMotion);
+Near(additiveX, 1.0f, "gyro-stick additive X clamp");
+Near(additiveY, -0.2f, "gyro-stick additive path preserves physical Y");
+
 // A real DS4 sensor clock advances at 187,500 units/s (5.33 us/unit). The old
 // QuestPad implementation advanced by one per host report, making sensor time about
 // 2,600x too slow at 72 Hz. Verify the new monotonic conversion including 16-bit wrap.
@@ -79,4 +114,4 @@ ushort wrappedDelta = unchecked((ushort)(t1 - t0));
 Check(wrappedDelta == unchecked((ushort)187_500),
     $"DS4 sensor clock must advance 187500 units/s modulo 16-bit; got {wrappedDelta}");
 
-Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, DS4 sensor clock valid.");
+Console.WriteLine("Motion smoke tests passed: gyro unchanged, gravity accelerometer valid, XInput gyro-stick mapping valid, DS4 sensor clock valid.");

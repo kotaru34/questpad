@@ -112,14 +112,12 @@ internal sealed class RuntimeSettings
     {
         lock (gate)
         {
-            // Native gyro has nowhere to go in XInput. Selecting Xbox explicitly
-            // therefore disables gyro instead of silently spending Quest tracking
-            // power on data that the active backend cannot expose.
-            value = value with
-            {
-                Output = output,
-                GyroSource = output == OutputMode.Xbox360 ? GyroSourceMode.Off : value.GyroSource
-            };
+            // Output selection is authoritative and deliberately does not destroy an
+            // already-enabled motion source. SetGyroSource still chooses DS4 by default,
+            // preserving the established UX. If the user explicitly switches to Xbox
+            // afterwards, the XInput backend keeps receiving gyro and converts it to an
+            // additive right-stick compatibility signal for games with broken DS4 paths.
+            value = value with { Output = output };
             SaveLocked();
         }
     }
@@ -222,9 +220,9 @@ internal sealed class RuntimeSettings
             ? Math.Clamp(loaded.SteeringRangeDegrees, 60.0f, 1080.0f)
             : defaults.SteeringRangeDegrees;
 
-        if (gyro != GyroSourceMode.Off)
-            output = OutputMode.DualShock4;
-
+        // Keep a persisted explicit Xbox+gyro combination intact. This state can only
+        // be reached by selecting Xbox after enabling gyro, so existing users who just
+        // enable a gyro source still get the native DS4 backend automatically.
         return new RuntimeSettingsSnapshot(
             output,
             gyro,

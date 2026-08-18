@@ -1,80 +1,64 @@
 name: gyro-stick-0.4.3-candidate
 on:
-  pull_request:
-    branches: [ main ]
   push:
     branches: [ agent/session-polish ]
 
+permissions:
+  contents: write
+
 jobs:
   windows-host:
-    if: "github.event_name == 'pull_request' || startsWith(github.event.head_commit.message, 'Run isolated 0.4.3')"
+    if: "startsWith(github.event.head_commit.message, 'Run isolated 0.4.3 source candidate')"
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Apply host-only gyro-to-stick compatibility probe
-        shell: pwsh
-        run: |
-          $p = 'host/InputModels.cs'
-          $s = Get-Content $p -Raw
-          $pattern = 'Output = output,\s*GyroSource = output == OutputMode\.Xbox360 \? GyroSourceMode\.Off : value\.GyroSource'
-          $matches = [regex]::Matches($s, $pattern)
-          if ($matches.Count -ne 1) { throw "InputModels patch expected one match, got $($matches.Count)" }
-          $s = [regex]::Replace($s, $pattern, 'Output = output', 1)
-          Set-Content $p $s -NoNewline
-
-          $p = 'host/OutputBackends.cs'
-          $s = Get-Content $p -Raw
-          $pattern = '_ = batteryPercent;\r?\n        pad\.ResetReport\(\);'
-          $matches = [regex]::Matches($s, $pattern)
-          if ($matches.Count -ne 1) { throw "Xbox backend patch expected one insertion point, got $($matches.Count)" }
-          $replacement = @'
-_ = batteryPercent;
-
-        // Diagnostic compatibility path: convert right Touch angular rate directly
-        // to additive XInput right-stick input, bypassing Steam Input entirely.
-        float rightX = s.RX;
-        float rightY = s.RY;
-        if (motion.GyroValid)
-        {
-            const float RadToDeg = 180.0f / MathF.PI;
-            const float FullStickDegreesPerSecond = 180.0f;
-            float yaw = -motion.GyroRadiansPerSecond.Y * RadToDeg / FullStickDegreesPerSecond;
-            float pitch = motion.GyroRadiansPerSecond.X * RadToDeg / FullStickDegreesPerSecond;
-            rightX = Math.Clamp(rightX + yaw, -1.0f, 1.0f);
-            rightY = Math.Clamp(rightY + pitch, -1.0f, 1.0f);
-        }
-
-        pad.ResetReport();
-'@
-          $s = [regex]::Replace($s, $pattern, $replacement, 1)
-          $s = $s.Replace('Xbox360Axis.RightThumbX, ToShort(s.RX)', 'Xbox360Axis.RightThumbX, ToShort(rightX)')
-          $s = $s.Replace('Xbox360Axis.RightThumbY, ToShort(s.RY)', 'Xbox360Axis.RightThumbY, ToShort(rightY)')
-          Set-Content $p $s -NoNewline
-
-          foreach ($p in @('host/QuestPad.Host.csproj', 'host/QuestPad.Host.Console.csproj')) {
-            $s = Get-Content $p -Raw
-            $s = $s.Replace('<Version>0.4.2-test</Version>', '<Version>0.4.3-stick-test</Version>')
-            $s = $s.Replace('<FileVersion>0.4.2.0</FileVersion>', '<FileVersion>0.4.3.0</FileVersion>')
-            Set-Content $p $s -NoNewline
-          }
       - name: Mapper regression smoke test
         run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
-      - name: Motion regression smoke test
+      - name: Motion/IMU and gyro-stick regression smoke test
         run: dotnet run --project tests/MotionSmoke/MotionSmoke.csproj -c Release
       - name: Publish tray host
         run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
       - name: Publish console host
         run: dotnet publish host/QuestPad.Host.Console.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/console
-      - name: Assemble package
+      - name: Assemble Windows package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/package | Out-Null
           Copy-Item dist/tray/QuestPad.Host.exe dist/package/QuestPad.Host.exe
           Copy-Item dist/console/QuestPad.Host.Console.exe dist/package/QuestPad.Host.Console.exe
+      - name: Smoke-test portable defaults
+        shell: pwsh
+        run: |
+          Push-Location dist/package
+          & .\QuestPad.Host.Console.exe --quest-view black --help | Out-Null
+          if (!(Test-Path .\QuestPad.settings.json)) {
+            throw "QuestPad.settings.json was not created next to the executable"
+          }
+          $settings = Get-Content .\QuestPad.settings.json -Raw | ConvertFrom-Json
+          if ($settings.Output -ne 'Xbox360' -or $settings.GyroSource -ne 'Off') {
+            throw "Portable settings file did not contain the expected defaults"
+          }
+          Pop-Location
       - uses: actions/upload-artifact@v4
         with:
           name: QuestPad-Host-0.4.3-stick-test
           path: dist/package/*
+
+  run-marker:
+    if: "startsWith(github.event.head_commit.message, 'Run isolated 0.4.3 source candidate')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/session-polish
+      - name: Record candidate run
+        run: |
+          printf 'run_id=%s\nsha=%s\n' '${{ github.run_id }}' '${{ github.sha }}' > .github/gyro-stick-source-run.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/gyro-stick-source-run.txt
+          git commit -m 'Record 0.4.3 source candidate CI'
+          git push origin HEAD:agent/session-polish
