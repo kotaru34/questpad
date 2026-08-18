@@ -1,80 +1,42 @@
 name: build
 on:
+  workflow_dispatch:
   push:
-    branches: [ agent/session-polish ]
-
-permissions:
-  contents: write
+    branches: [ main ]
 
 jobs:
-  run-id:
-    if: "!startsWith(github.event.head_commit.message, 'Record 0.4.3')"
+  quest-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          ref: agent/session-polish
-      - name: Record this build run id
-        run: |
-          printf 'run_id=%s\nsha=%s\n' '${{ github.run_id }}' '${{ github.sha }}' > .github/gyro-stick-build-run.txt
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/gyro-stick-build-run.txt
-          git commit -m 'Record 0.4.3 build run id' || exit 0
-          git push origin HEAD:agent/session-polish
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: yes | sdkmanager --licenses >/dev/null
+      - run: sdkmanager "platforms;android-32" "build-tools;32.0.0" "cmake;3.22.1" "ndk;27.0.12077973"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+      - name: Build QuestPad and motion probe
+        run: gradle :quest:assembleDebug :motionprobe:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-APK
+          path: quest/build/outputs/apk/debug/quest-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-Motion-Probe-APK
+          path: motionprobe/build/outputs/apk/debug/motionprobe-debug.apk
 
   windows-host:
-    if: "!startsWith(github.event.head_commit.message, 'Record 0.4.3')"
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Apply 0.4.3 gyro-to-stick compatibility probe
-        shell: pwsh
-        run: |
-          $p = 'host/InputModels.cs'
-          $s = Get-Content $p -Raw
-          $pattern = 'Output = output,\s*GyroSource = output == OutputMode\.Xbox360 \? GyroSourceMode\.Off : value\.GyroSource'
-          $matches = [regex]::Matches($s, $pattern)
-          if ($matches.Count -ne 1) { throw "InputModels diagnostic patch expected one SetOutput match, got $($matches.Count)" }
-          $s = [regex]::Replace($s, $pattern, 'Output = output', 1)
-          Set-Content $p $s -NoNewline
-
-          $p = 'host/OutputBackends.cs'
-          $s = Get-Content $p -Raw
-          $pattern = '_ = batteryPercent;\r?\n        pad\.ResetReport\(\);'
-          $matches = [regex]::Matches($s, $pattern)
-          if ($matches.Count -ne 1) { throw "OutputBackends diagnostic patch expected one Xbox Apply insertion point, got $($matches.Count)" }
-          $replacement = @'
-_ = batteryPercent;
-
-        float rightX = s.RX;
-        float rightY = s.RY;
-        if (motion.GyroValid)
-        {
-            const float RadToDeg = 180.0f / MathF.PI;
-            const float FullStickDegreesPerSecond = 180.0f;
-            float yaw = -motion.GyroRadiansPerSecond.Y * RadToDeg / FullStickDegreesPerSecond;
-            float pitch = motion.GyroRadiansPerSecond.X * RadToDeg / FullStickDegreesPerSecond;
-            rightX = Math.Clamp(rightX + yaw, -1.0f, 1.0f);
-            rightY = Math.Clamp(rightY + pitch, -1.0f, 1.0f);
-        }
-
-        pad.ResetReport();
-'@
-          $s = [regex]::Replace($s, $pattern, $replacement, 1)
-          $s = $s.Replace('Xbox360Axis.RightThumbX, ToShort(s.RX)', 'Xbox360Axis.RightThumbX, ToShort(rightX)')
-          $s = $s.Replace('Xbox360Axis.RightThumbY, ToShort(s.RY)', 'Xbox360Axis.RightThumbY, ToShort(rightY)')
-          Set-Content $p $s -NoNewline
-
-          foreach ($p in @('host/QuestPad.Host.csproj', 'host/QuestPad.Host.Console.csproj')) {
-            $s = Get-Content $p -Raw
-            $s = $s.Replace('<Version>0.4.2-test</Version>', '<Version>0.4.3-stick-test</Version>')
-            $s = $s.Replace('<FileVersion>0.4.2.0</FileVersion>', '<FileVersion>0.4.3.0</FileVersion>')
-            Set-Content $p $s -NoNewline
-          }
       - name: Mapper regression smoke test
         run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
       - name: Motion/IMU regression smoke test
@@ -83,13 +45,26 @@ _ = batteryPercent;
         run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
       - name: Publish console host
         run: dotnet publish host/QuestPad.Host.Console.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/console
-      - name: Assemble package
+      - name: Assemble Windows package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/package | Out-Null
           Copy-Item dist/tray/QuestPad.Host.exe dist/package/QuestPad.Host.exe
           Copy-Item dist/console/QuestPad.Host.Console.exe dist/package/QuestPad.Host.Console.exe
+      - name: Smoke-test portable settings
+        shell: pwsh
+        run: |
+          Push-Location dist/package
+          & .\QuestPad.Host.Console.exe --quest-view black --help | Out-Null
+          if (!(Test-Path .\QuestPad.settings.json)) {
+            throw "QuestPad.settings.json was not created next to the executable"
+          }
+          $settings = Get-Content .\QuestPad.settings.json -Raw | ConvertFrom-Json
+          if ($settings.Output -ne 'Xbox360' -or $settings.GyroSource -ne 'Off') {
+            throw "Portable settings file did not contain the expected defaults"
+          }
+          Pop-Location
       - uses: actions/upload-artifact@v4
         with:
-          name: QuestPad-Host-0.4.3-stick-test
+          name: QuestPad-Host-win-x64
           path: dist/package/*
