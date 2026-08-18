@@ -1,0 +1,50 @@
+name: ds4-bisect-040
+on:
+  push:
+    branches: [ agent/ds4-bisect-040 ]
+
+jobs:
+  quest-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: yes | sdkmanager --licenses >/dev/null
+      - run: sdkmanager "platforms;android-32" "build-tools;32.0.0" "cmake;3.22.1" "ndk;27.0.12077973"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+      - name: Build exact 0.4.0 Quest APK
+        run: gradle :quest:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-0.4.0-control-APK
+          path: quest/build/outputs/apk/debug/quest-debug.apk
+
+  windows-host:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Mapper regression smoke test
+        run: dotnet run --project tests/MapperSmoke/MapperSmoke.csproj -c Release
+      - name: Publish tray host
+        run: dotnet publish host/QuestPad.Host.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/tray
+      - name: Publish console host
+        run: dotnet publish host/QuestPad.Host.Console.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/console
+      - name: Assemble control package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/package | Out-Null
+          Copy-Item dist/tray/QuestPad.Host.exe dist/package/QuestPad.Host.exe
+          Copy-Item dist/console/QuestPad.Host.Console.exe dist/package/QuestPad.Host.Console.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuestPad-Host-0.4.0-control
+          path: dist/package/*
