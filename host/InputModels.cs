@@ -51,7 +51,10 @@ internal readonly record struct RuntimeSettingsSnapshot(
     SmoothingLevel SteeringSmoothing,
     float SteeringRangeDegrees,
     bool SteeringGripClutch,
-    bool SteeringInverted);
+    bool SteeringInverted)
+{
+    public float GyroStickSensitivity { get; init; }
+}
 
 internal sealed class RuntimeSettings
 {
@@ -76,7 +79,10 @@ internal sealed class RuntimeSettings
         SmoothingLevel.Light,
         240.0f,
         false,
-        false);
+        false)
+    {
+        GyroStickSensitivity = 1.0f
+    };
 
     public RuntimeSettings()
     {
@@ -101,6 +107,8 @@ internal sealed class RuntimeSettings
         {
             SaveLocked();
         }
+
+        GyroStickCompatibility.SetSensitivity(value.GyroStickSensitivity);
     }
 
     public RuntimeSettingsSnapshot Snapshot()
@@ -149,6 +157,17 @@ internal sealed class RuntimeSettings
         lock (gate)
         {
             value = value with { GyroStickLock = enabled };
+            SaveLocked();
+        }
+    }
+
+    public void SetGyroStickSensitivity(float sensitivity)
+    {
+        lock (gate)
+        {
+            float normalized = GyroStickCompatibility.NormalizeSensitivity(sensitivity);
+            value = value with { GyroStickSensitivity = normalized };
+            GyroStickCompatibility.SetSensitivity(normalized);
             SaveLocked();
         }
     }
@@ -219,6 +238,9 @@ internal sealed class RuntimeSettings
         float steeringRange = float.IsFinite(loaded.SteeringRangeDegrees)
             ? Math.Clamp(loaded.SteeringRangeDegrees, 60.0f, 1080.0f)
             : defaults.SteeringRangeDegrees;
+        float gyroStickSensitivity = loaded.GyroStickSensitivity > 0.0f
+            ? GyroStickCompatibility.NormalizeSensitivity(loaded.GyroStickSensitivity)
+            : defaults.GyroStickSensitivity;
 
         // Keep a persisted explicit Xbox+gyro combination intact. This state can only
         // be reached by selecting Xbox after enabling gyro, so existing users who just
@@ -233,7 +255,10 @@ internal sealed class RuntimeSettings
             steeringSmoothing,
             steeringRange,
             loaded.SteeringGripClutch,
-            loaded.SteeringInverted);
+            loaded.SteeringInverted)
+        {
+            GyroStickSensitivity = gyroStickSensitivity
+        };
     }
 
     private void SaveLocked()
